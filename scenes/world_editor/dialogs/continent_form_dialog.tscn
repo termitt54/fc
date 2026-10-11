@@ -1,0 +1,7 @@
+[gd_scene load_steps=3 format=3 uid="uid://ccontinentform01"]
+
+[ext_resource type="PackedScene" uid="uid://cwemodal000001" path="res://ui/components/we_modal.tscn" id="1_modal"]
+[ext_resource type="Script" path="res://scenes/world_editor/dialogs/continent_form_dialog.gd" id="2_script"]
+
+[node name="ContinentFormDialog" instance=ExtResource("1_modal")]
+script = ExtResource("2_script")

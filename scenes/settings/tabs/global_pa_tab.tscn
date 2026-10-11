@@ -1,0 +1,89 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scenes/settings/tabs/global_pa_tab.gd" id="1_script"]
+[ext_resource type="Script" path="res://ui/components/we_button.gd" id="2_button"]
+
+[node name="GlobalPaTab" type="MarginContainer"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_top = 8
+script = ExtResource("1_script")
+
+[node name="Card" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Pad" type="MarginContainer" parent="Card"]
+layout_mode = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
+
+[node name="Body" type="VBoxContainer" parent="Card/Pad"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="Card/Pad/Body"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.96, 0.98, 0.98, 1)
+theme_override_font_sizes/font_size = 20
+text = "Рождение по таланту страны"
+
+[node name="Hint" type="Label" parent="Card/Pad/Body"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.72, 0.8, 0.84, 1)
+theme_override_font_sizes/font_size = 13
+text = "У каждого таланта свои шансы. Сумма строки — 100%. Процент — сколько игроков из 100 рождаются с потенциалом этой группы. Игрок появляется сразу в клубе."
+autowrap_mode = 3
+
+[node name="Header" type="HBoxContainer" parent="Card/Pad/Body"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="TableScroll" type="ScrollContainer" parent="Card/Pad/Body"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+horizontal_scroll_mode = 0
+
+[node name="Rows" type="VBoxContainer" parent="Card/Pad/Body/TableScroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 2
+
+[node name="Actions" type="HBoxContainer" parent="Card/Pad/Body"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="ResetButton" type="Button" parent="Card/Pad/Body/Actions"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 34)
+layout_mode = 2
+script = ExtResource("2_button")
+kind = 1
+text = "По умолчанию"
+
+[node name="StatusLabel" type="Label" parent="Card/Pad/Body/Actions"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.52, 0.6, 0.66, 1)
+theme_override_font_sizes/font_size = 12
+text = ""
+autowrap_mode = 3
+
+[node name="SaveButton" type="Button" parent="Card/Pad/Body/Actions"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(140, 34)
+layout_mode = 2
+script = ExtResource("2_button")
+kind = 0
+text = "Сохранить"

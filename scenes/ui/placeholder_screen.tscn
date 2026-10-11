@@ -1,0 +1,52 @@
+[gd_scene load_steps=4 format=3 uid="uid://cplaceholder001"]
+
+[ext_resource type="Script" path="res://scenes/ui/placeholder_screen.gd" id="1_script"]
+[ext_resource type="PackedScene" uid="uid://cwescreenbg001" path="res://ui/components/we_screen_bg.tscn" id="2_bg"]
+[ext_resource type="Script" path="res://ui/components/we_button.gd" id="3_button"]
+
+[node name="PlaceholderScreen" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_script")
+
+[node name="WeScreenBg" parent="." instance=ExtResource("2_bg")]
+layout_mode = 1
+
+[node name="Center" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Content" type="VBoxContainer" parent="Center"]
+layout_mode = 2
+theme_override_constants/separation = 24
+
+[node name="Title" type="Label" parent="Center/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.93, 0.94, 0.97, 1)
+theme_override_font_sizes/font_size = 26
+text = "Заглушка"
+horizontal_alignment = 1
+
+[node name="Hint" type="Label" parent="Center/Content"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.6, 0.64, 0.7, 1)
+theme_override_font_sizes/font_size = 14
+text = "Раздел в разработке"
+horizontal_alignment = 1
+
+[node name="Back" type="Button" parent="Center/Content"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(240, 44)
+layout_mode = 2
+script = ExtResource("3_button")
+kind = 1
+text = "Назад"

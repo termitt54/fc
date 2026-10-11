@@ -1,0 +1,69 @@
+[gd_scene load_steps=4 format=3 uid="uid://bq8mainmenu001"]
+
+[ext_resource type="Script" path="res://scenes/main_menu/main_menu.gd" id="1_script"]
+[ext_resource type="PackedScene" uid="uid://cwescreenbg001" path="res://ui/components/we_screen_bg.tscn" id="2_bg"]
+[ext_resource type="Script" path="res://ui/components/we_button.gd" id="3_button"]
+
+[node name="MainMenu" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_script")
+
+[node name="WeScreenBg" parent="." instance=ExtResource("2_bg")]
+layout_mode = 1
+
+[node name="Center" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Menu" type="VBoxContainer" parent="Center"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="NewGame" type="Button" parent="Center/Menu"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(300, 48)
+layout_mode = 2
+script = ExtResource("3_button")
+kind = 1
+text = "Новая игра"
+
+[node name="LoadGame" type="Button" parent="Center/Menu"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(300, 48)
+layout_mode = 2
+script = ExtResource("3_button")
+kind = 1
+text = "Загрузить игру"
+
+[node name="WorldEditor" type="Button" parent="Center/Menu"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(300, 48)
+layout_mode = 2
+script = ExtResource("3_button")
+kind = 0
+text = "Редактор мира"
+
+[node name="Settings" type="Button" parent="Center/Menu"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(300, 48)
+layout_mode = 2
+script = ExtResource("3_button")
+kind = 1
+text = "Настройки"
+
+[node name="Exit" type="Button" parent="Center/Menu"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(300, 48)
+layout_mode = 2
+script = ExtResource("3_button")
+kind = 1
+text = "Выход"

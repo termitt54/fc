@@ -1,0 +1,26 @@
+[gd_scene load_steps=2 format=3 uid="uid://cwesearchfield01"]
+
+[ext_resource type="Script" path="res://ui/components/we_search_field.gd" id="1_script"]
+
+[node name="WeSearchField" type="PanelContainer"]
+custom_minimum_size = Vector2(0, 34)
+script = ExtResource("1_script")
+
+[node name="HBox" type="HBoxContainer" parent="."]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Glyph" type="Label" parent="HBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.55, 0.58, 0.64, 1)
+theme_override_font_sizes/font_size = 14
+text = "⌕"
+vertical_alignment = 1
+
+[node name="Input" type="LineEdit" parent="HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "Поиск…"
+flat = true
+caret_blink = true

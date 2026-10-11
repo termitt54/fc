@@ -1,0 +1,85 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scenes/settings/tabs/match_sim_tab.gd" id="1_script"]
+[ext_resource type="Script" path="res://ui/components/we_button.gd" id="2_button"]
+
+[node name="MatchSimTab" type="MarginContainer"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_top = 12
+script = ExtResource("1_script")
+
+[node name="Scroll" type="ScrollContainer" parent="."]
+layout_mode = 2
+horizontal_scroll_mode = 0
+
+[node name="Center" type="CenterContainer" parent="Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Card" type="PanelContainer" parent="Scroll/Center"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(920, 0)
+layout_mode = 2
+
+[node name="Pad" type="MarginContainer" parent="Scroll/Center/Card"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 8
+
+[node name="Body" type="VBoxContainer" parent="Scroll/Center/Card/Pad"]
+layout_mode = 2
+theme_override_constants/separation = 16
+
+[node name="Title" type="Label" parent="Scroll/Center/Card/Pad/Body"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.96, 0.98, 0.98, 1)
+theme_override_font_sizes/font_size = 20
+text = "Симуляция матчей"
+
+[node name="Hint" type="Label" parent="Scroll/Center/Card/Pad/Body"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.72, 0.8, 0.84, 1)
+theme_override_font_sizes/font_size = 13
+text = "Точечная калибровка движка 8 на 8. Усталость и восстановление задаются точками 1 / 10 / 20 — сохраните и крутите под себя. Изменённые ползунки подсвечиваются."
+autowrap_mode = 3
+
+[node name="Sections" type="VBoxContainer" parent="Scroll/Center/Card/Pad/Body"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 18
+
+[node name="Actions" type="HBoxContainer" parent="Scroll/Center/Card/Pad/Body"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="ResetButton" type="Button" parent="Scroll/Center/Card/Pad/Body/Actions"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 34)
+layout_mode = 2
+script = ExtResource("2_button")
+kind = 1
+text = "По умолчанию"
+
+[node name="StatusLabel" type="Label" parent="Scroll/Center/Card/Pad/Body/Actions"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.52, 0.6, 0.66, 1)
+theme_override_font_sizes/font_size = 12
+text = ""
+autowrap_mode = 3
+
+[node name="SaveButton" type="Button" parent="Scroll/Center/Card/Pad/Body/Actions"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(140, 34)
+layout_mode = 2
+script = ExtResource("2_button")
+kind = 0
+text = "Сохранить"

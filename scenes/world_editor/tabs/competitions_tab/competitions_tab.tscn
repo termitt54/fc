@@ -1,0 +1,33 @@
+[gd_scene load_steps=4 format=3 uid="uid://ccompetitionstab1"]
+
+[ext_resource type="Script" path="res://scenes/world_editor/tabs/competitions_tab/competitions_tab.gd" id="1_script"]
+[ext_resource type="PackedScene" uid="uid://cweeditorcol001" path="res://ui/components/we_editor_column.tscn" id="2_column"]
+[ext_resource type="PackedScene" uid="uid://cwemessagedlg1" path="res://ui/components/we_message_dialog.tscn" id="3_message"]
+
+[node name="CompetitionsTab" type="MarginContainer"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 0
+theme_override_constants/margin_top = 12
+theme_override_constants/margin_right = 0
+theme_override_constants/margin_bottom = 0
+script = ExtResource("1_script")
+
+[node name="Columns" type="HBoxContainer" parent="."]
+layout_mode = 2
+theme_override_constants/separation = 14
+
+[node name="CompetitionCol" parent="Columns" instance=ExtResource("2_column")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+title = "Турниры"
+
+[node name="ConfirmDialog" parent="." instance=ExtResource("3_message")]
+unique_name_in_owner = true
+
+[node name="InfoDialog" parent="." instance=ExtResource("3_message")]
+unique_name_in_owner = true

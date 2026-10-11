@@ -1,0 +1,7 @@
+[gd_scene format=3 uid="uid://b765ikue0ojqo"]
+
+[ext_resource type="PackedScene" uid="uid://cwemodal000001" path="res://ui/components/we_modal.tscn" id="1_modal"]
+[ext_resource type="Script" path="res://scenes/world_editor/dialogs/competition_unit_clubs_dialog.gd" id="2_script"]
+
+[node name="CompetitionUnitClubsDialog" instance=ExtResource("1_modal")]
+script = ExtResource("2_script")

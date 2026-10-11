@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://ctestdbworld001"]
+
+[ext_resource type="Script" path="res://tests/database/test_world_database.gd" id="1_script"]
+
+[node name="TestWorldDatabase" type="Node"]
+script = ExtResource("1_script")

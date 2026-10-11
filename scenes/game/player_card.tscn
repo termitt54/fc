@@ -1,0 +1,148 @@
+[gd_scene load_steps=3 format=3 uid="uid://cplayercard0001"]
+
+[ext_resource type="Script" path="res://scenes/game/player_card.gd" id="1_script"]
+[ext_resource type="Script" path="res://ui/components/we_button.gd" id="2_button"]
+
+[node name="PlayerCard" type="VBoxContainer"]
+visible = false
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 10
+script = ExtResource("1_script")
+
+[node name="HeaderCard" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="HeaderPad" type="MarginContainer" parent="HeaderCard"]
+layout_mode = 2
+theme_override_constants/margin_left = 12
+theme_override_constants/margin_top = 10
+theme_override_constants/margin_right = 12
+theme_override_constants/margin_bottom = 10
+
+[node name="HeaderRow" type="HBoxContainer" parent="HeaderCard/HeaderPad"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="PosBadge" type="PanelContainer" parent="HeaderCard/HeaderPad/HeaderRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(52, 52)
+layout_mode = 2
+size_flags_vertical = 4
+
+[node name="PosPad" type="CenterContainer" parent="HeaderCard/HeaderPad/HeaderRow/PosBadge"]
+layout_mode = 2
+
+[node name="PosLabel" type="Label" parent="HeaderCard/HeaderPad/HeaderRow/PosBadge/PosPad"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.32, 0.86, 0.74, 1)
+theme_override_font_sizes/font_size = 17
+text = "—"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="Identity" type="VBoxContainer" parent="HeaderCard/HeaderPad/HeaderRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 4
+theme_override_constants/separation = 4
+
+[node name="NameLabel" type="Label" parent="HeaderCard/HeaderPad/HeaderRow/Identity"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.95, 0.97, 0.98, 1)
+theme_override_font_sizes/font_size = 20
+text = "Игрок"
+clip_text = true
+text_overrun_behavior = 3
+
+[node name="MetaHost" type="HBoxContainer" parent="HeaderCard/HeaderPad/HeaderRow/Identity"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="FactsHost" type="HBoxContainer" parent="HeaderCard/HeaderPad/HeaderRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 4
+theme_override_constants/separation = 6
+
+[node name="StarsChip" type="PanelContainer" parent="HeaderCard/HeaderPad/HeaderRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 42)
+layout_mode = 2
+size_flags_vertical = 4
+
+[node name="StarsPad" type="MarginContainer" parent="HeaderCard/HeaderPad/HeaderRow/StarsChip"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 4
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 4
+
+[node name="StarsBox" type="VBoxContainer" parent="HeaderCard/HeaderPad/HeaderRow/StarsChip/StarsPad"]
+layout_mode = 2
+theme_override_constants/separation = 0
+alignment = 1
+
+[node name="StarsCaption" type="Label" parent="HeaderCard/HeaderPad/HeaderRow/StarsChip/StarsPad/StarsBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.52, 0.6, 0.66, 1)
+theme_override_font_sizes/font_size = 10
+text = "Репутация"
+
+[node name="StarsHost" type="CenterContainer" parent="HeaderCard/HeaderPad/HeaderRow/StarsChip/StarsPad/StarsBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 0
+
+[node name="AbilityChip" type="PanelContainer" parent="HeaderCard/HeaderPad/HeaderRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 42)
+layout_mode = 2
+size_flags_vertical = 4
+
+[node name="AbilityPad" type="MarginContainer" parent="HeaderCard/HeaderPad/HeaderRow/AbilityChip"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 4
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 4
+
+[node name="AbilityBox" type="VBoxContainer" parent="HeaderCard/HeaderPad/HeaderRow/AbilityChip/AbilityPad"]
+layout_mode = 2
+theme_override_constants/separation = 0
+alignment = 1
+
+[node name="AbilityCaption" type="Label" parent="HeaderCard/HeaderPad/HeaderRow/AbilityChip/AbilityPad/AbilityBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.52, 0.6, 0.66, 1)
+theme_override_font_sizes/font_size = 10
+text = "Рейтинг"
+
+[node name="AbilityLabel" type="Label" parent="HeaderCard/HeaderPad/HeaderRow/AbilityChip/AbilityPad/AbilityBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.32, 0.86, 0.74, 1)
+theme_override_font_sizes/font_size = 12
+text = "CA — · PA —"
+
+[node name="CloseButton" type="Button" parent="HeaderCard/HeaderPad/HeaderRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(42, 42)
+layout_mode = 2
+size_flags_horizontal = 0
+size_flags_vertical = 4
+focus_mode = 0
+script = ExtResource("2_button")
+kind = 1
+text = "✕"
+
+[node name="BodyHost" type="Control" parent="."]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3

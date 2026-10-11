@@ -1,0 +1,60 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scenes/world_editor/tabs/teams_tab/teams_tab.gd" id="1_script"]
+[ext_resource type="PackedScene" path="res://ui/components/we_editor_column.tscn" id="2_column"]
+[ext_resource type="PackedScene" path="res://ui/components/we_select_field.tscn" id="3_select"]
+[ext_resource type="PackedScene" path="res://ui/components/we_message_dialog.tscn" id="4_message"]
+
+[node name="TeamsTab" type="MarginContainer"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 0
+theme_override_constants/margin_top = 12
+theme_override_constants/margin_right = 0
+theme_override_constants/margin_bottom = 0
+script = ExtResource("1_script")
+
+[node name="Columns" type="HBoxContainer" parent="."]
+layout_mode = 2
+theme_override_constants/separation = 14
+
+[node name="CountryPane" type="VBoxContainer" parent="Columns"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 10
+
+[node name="CountrySort" parent="Columns/CountryPane" instance=ExtResource("3_select")]
+unique_name_in_owner = true
+layout_mode = 2
+compact = true
+
+[node name="CountryCol" parent="Columns/CountryPane" instance=ExtResource("2_column")]
+unique_name_in_owner = true
+layout_mode = 2
+title = "Страны"
+
+[node name="ClubPane" type="VBoxContainer" parent="Columns"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 10
+
+[node name="ClubSort" parent="Columns/ClubPane" instance=ExtResource("3_select")]
+unique_name_in_owner = true
+layout_mode = 2
+compact = true
+
+[node name="ClubCol" parent="Columns/ClubPane" instance=ExtResource("2_column")]
+unique_name_in_owner = true
+layout_mode = 2
+title = "Команды"
+
+[node name="ConfirmDialog" parent="." instance=ExtResource("4_message")]
+unique_name_in_owner = true
+
+[node name="InfoDialog" parent="." instance=ExtResource("4_message")]
+unique_name_in_owner = true

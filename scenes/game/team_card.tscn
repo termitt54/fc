@@ -1,0 +1,179 @@
+[gd_scene load_steps=3 format=3 uid="uid://cteamcard00001"]
+
+[ext_resource type="Script" path="res://scenes/game/team_card.gd" id="1_script"]
+[ext_resource type="Script" path="res://ui/components/we_button.gd" id="2_button"]
+
+[node name="TeamCard" type="VBoxContainer"]
+visible = false
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 0
+script = ExtResource("1_script")
+
+[node name="OuterPad" type="MarginContainer" parent="."]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/margin_left = 4
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 4
+theme_override_constants/margin_bottom = 16
+
+[node name="Stack" type="VBoxContainer" parent="OuterPad"]
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_constants/separation = 10
+
+[node name="HeaderCard" type="PanelContainer" parent="OuterPad/Stack"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="HeaderPad" type="MarginContainer" parent="OuterPad/Stack/HeaderCard"]
+layout_mode = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 14
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 14
+
+[node name="HeaderRow" type="HBoxContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="LogoSlot" type="CenterContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(56, 56)
+layout_mode = 2
+size_flags_vertical = 0
+
+[node name="Identity" type="VBoxContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow"]
+layout_mode = 2
+size_flags_vertical = 0
+theme_override_constants/separation = 4
+
+[node name="NameLabel" type="Label" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/Identity"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.95, 0.97, 0.98, 1)
+theme_override_font_sizes/font_size = 22
+text = "Клуб"
+
+[node name="CountryRow" type="HBoxContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/Identity"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 8
+mouse_default_cursor_shape = 2
+
+[node name="FlagSlot" type="CenterContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/Identity/CountryRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(28, 18)
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+
+[node name="MetaLabel" type="Label" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/Identity/CountryRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.72, 0.8, 0.84, 1)
+theme_override_font_sizes/font_size = 14
+text = ""
+vertical_alignment = 1
+
+[node name="Spacer" type="Control" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 2
+
+[node name="RightMetrics" type="VBoxContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow"]
+layout_mode = 2
+size_flags_horizontal = 0
+size_flags_vertical = 0
+theme_override_constants/separation = 4
+alignment = 0
+
+[node name="StarsChip" type="PanelContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/RightMetrics"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 8
+
+[node name="StarsPad" type="MarginContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/RightMetrics/StarsChip"]
+layout_mode = 2
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 5
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 5
+
+[node name="StarsHost" type="CenterContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/RightMetrics/StarsChip/StarsPad"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="LeagueChip" type="PanelContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/RightMetrics"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 8
+mouse_default_cursor_shape = 2
+
+[node name="LeaguePad" type="MarginContainer" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/RightMetrics/LeagueChip"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 5
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 5
+
+[node name="LeagueLabel" type="Label" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow/RightMetrics/LeagueChip/LeaguePad"]
+unique_name_in_owner = true
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.72, 0.8, 0.84, 1)
+theme_override_font_sizes/font_size = 12
+text = "—"
+horizontal_alignment = 2
+vertical_alignment = 1
+
+[node name="CloseButton" type="Button" parent="OuterPad/Stack/HeaderCard/HeaderPad/HeaderRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(30, 30)
+layout_mode = 2
+size_flags_horizontal = 0
+size_flags_vertical = 0
+focus_mode = 0
+script = ExtResource("2_button")
+kind = 1
+text = "✕"
+
+[node name="Columns" type="HBoxContainer" parent="OuterPad/Stack"]
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_constants/separation = 14
+
+[node name="SquadPanel" type="PanelContainer" parent="OuterPad/Stack/Columns"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+size_flags_stretch_ratio = 1.8
+
+[node name="SquadPad" type="MarginContainer" parent="OuterPad/Stack/Columns/SquadPanel"]
+layout_mode = 2
+theme_override_constants/margin_left = 14
+theme_override_constants/margin_top = 12
+theme_override_constants/margin_right = 14
+theme_override_constants/margin_bottom = 12
+
+[node name="SquadHost" type="VBoxContainer" parent="OuterPad/Stack/Columns/SquadPanel/SquadPad"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+theme_override_constants/separation = 8
+
+[node name="SideHost" type="VBoxContainer" parent="OuterPad/Stack/Columns"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(420, 0)
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+size_flags_stretch_ratio = 1.15
+theme_override_constants/separation = 10

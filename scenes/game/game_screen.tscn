@@ -1,0 +1,242 @@
+[gd_scene load_steps=12 format=3 uid="uid://tuulablntemi"]
+
+[ext_resource type="Script" path="res://scenes/game/game_screen.gd" id="1_script"]
+[ext_resource type="PackedScene" uid="uid://cwescreenbg001" path="res://ui/components/we_screen_bg.tscn" id="2_bg"]
+[ext_resource type="Script" path="res://ui/components/we_button.gd" id="3_button"]
+[ext_resource type="PackedScene" uid="uid://cweselectfield01" path="res://ui/components/we_select_field.tscn" id="4_select"]
+[ext_resource type="Script" path="res://ui/components/we_tab_bar.gd" id="5_tabs"]
+[ext_resource type="PackedScene" uid="uid://cteamcard00001" path="res://scenes/game/team_card.tscn" id="6_team_card"]
+[ext_resource type="PackedScene" uid="uid://cnationalteam01" path="res://scenes/game/national_team_card.tscn" id="7_national"]
+[ext_resource type="PackedScene" uid="uid://cplayercard0001" path="res://scenes/game/player_card.tscn" id="8_player_card"]
+[ext_resource type="PackedScene" uid="uid://ccoachcard00001" path="res://scenes/game/coach_card.tscn" id="10_coach_card"]
+[ext_resource type="PackedScene" path="res://scenes/game/world_players_view.tscn" id="9_players"]
+[ext_resource type="PackedScene" path="res://scenes/game/transfers_view.tscn" id="11_transfers"]
+
+[node name="GameScreen" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_script")
+
+[node name="WeScreenBg" parent="." instance=ExtResource("2_bg")]
+layout_mode = 1
+
+[node name="Margin" type="MarginContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 28
+theme_override_constants/margin_top = 14
+theme_override_constants/margin_right = 28
+theme_override_constants/margin_bottom = 18
+
+[node name="VBox" type="VBoxContainer" parent="Margin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="HeaderCard" type="PanelContainer" parent="Margin/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="HeaderPad" type="MarginContainer" parent="Margin/VBox/HeaderCard"]
+layout_mode = 2
+theme_override_constants/margin_left = 12
+theme_override_constants/margin_top = 6
+theme_override_constants/margin_right = 12
+theme_override_constants/margin_bottom = 6
+
+[node name="Header" type="HBoxContainer" parent="Margin/VBox/HeaderCard/HeaderPad"]
+layout_mode = 2
+theme_override_constants/separation = 10
+alignment = 1
+
+[node name="TournamentSelect" parent="Margin/VBox/HeaderCard/HeaderPad/Header" instance=ExtResource("4_select")]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(300, 0)
+layout_mode = 2
+size_flags_horizontal = 0
+size_flags_vertical = 4
+
+[node name="PlayersLink" type="Button" parent="Margin/VBox/HeaderCard/HeaderPad/Header"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(108, 34)
+layout_mode = 2
+size_flags_vertical = 4
+focus_mode = 0
+script = ExtResource("3_button")
+kind = 1
+text = "Игроки"
+
+[node name="MarketLink" type="Button" parent="Margin/VBox/HeaderCard/HeaderPad/Header"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(108, 34)
+layout_mode = 2
+size_flags_vertical = 4
+focus_mode = 0
+script = ExtResource("3_button")
+kind = 1
+text = "Рынок"
+
+[node name="TransfersLink" type="Button" parent="Margin/VBox/HeaderCard/HeaderPad/Header"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(132, 34)
+layout_mode = 2
+size_flags_vertical = 4
+focus_mode = 0
+script = ExtResource("3_button")
+kind = 1
+text = "Трансферы"
+
+[node name="Spacer" type="Control" parent="Margin/VBox/HeaderCard/HeaderPad/Header"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="MenuButton" type="Button" parent="Margin/VBox/HeaderCard/HeaderPad/Header"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(34, 30)
+layout_mode = 2
+size_flags_vertical = 4
+focus_mode = 0
+script = ExtResource("3_button")
+kind = 1
+text = "☰"
+
+[node name="ClockFrame" type="PanelContainer" parent="Margin/VBox/HeaderCard/HeaderPad/Header"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 0
+size_flags_vertical = 4
+
+[node name="ClockPad" type="MarginContainer" parent="Margin/VBox/HeaderCard/HeaderPad/Header/ClockFrame"]
+layout_mode = 2
+theme_override_constants/margin_left = 12
+theme_override_constants/margin_top = 4
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 4
+
+[node name="DayRow" type="HBoxContainer" parent="Margin/VBox/HeaderCard/HeaderPad/Header/ClockFrame/ClockPad"]
+layout_mode = 2
+alignment = 2
+theme_override_constants/separation = 8
+
+[node name="SeasonLabel" type="Label" parent="Margin/VBox/HeaderCard/HeaderPad/Header/ClockFrame/ClockPad/DayRow"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.95, 0.97, 0.98, 1)
+theme_override_font_sizes/font_size = 13
+text = "Сезон 1"
+vertical_alignment = 1
+
+[node name="DayLabel" type="Label" parent="Margin/VBox/HeaderCard/HeaderPad/Header/ClockFrame/ClockPad/DayRow"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.32, 0.86, 0.74, 1)
+theme_override_font_sizes/font_size = 13
+text = "День -2"
+vertical_alignment = 1
+
+[node name="TotalDaysLabel" type="Label" parent="Margin/VBox/HeaderCard/HeaderPad/Header/ClockFrame/ClockPad/DayRow"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.52, 0.6, 0.66, 1)
+theme_override_font_sizes/font_size = 12
+text = "из 1"
+vertical_alignment = 1
+
+[node name="AdvanceDayButton" type="Button" parent="Margin/VBox/HeaderCard/HeaderPad/Header/ClockFrame/ClockPad/DayRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(32, 26)
+layout_mode = 2
+script = ExtResource("3_button")
+kind = 0
+text = "▶"
+
+[node name="SimButton" type="Button" parent="Margin/VBox/HeaderCard/HeaderPad/Header/ClockFrame/ClockPad/DayRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(78, 26)
+layout_mode = 2
+script = ExtResource("3_button")
+kind = 1
+text = "Авто"
+
+[node name="NewSeasonButton" type="Button" parent="Margin/VBox/HeaderCard/HeaderPad/Header/ClockFrame/ClockPad/DayRow"]
+unique_name_in_owner = true
+visible = false
+custom_minimum_size = Vector2(150, 26)
+layout_mode = 2
+script = ExtResource("3_button")
+kind = 0
+text = "Новый сезон"
+
+[node name="TabBar" type="HBoxContainer" parent="Margin/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+script = ExtResource("5_tabs")
+
+[node name="Body" type="PanelContainer" parent="Margin/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="BodyMargin" type="MarginContainer" parent="Margin/VBox/Body"]
+layout_mode = 2
+theme_override_constants/margin_left = 14
+theme_override_constants/margin_top = 12
+theme_override_constants/margin_right = 14
+theme_override_constants/margin_bottom = 12
+
+[node name="Scroll" type="ScrollContainer" parent="Margin/VBox/Body/BodyMargin"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+horizontal_scroll_mode = 0
+
+[node name="Content" type="VBoxContainer" parent="Margin/VBox/Body/BodyMargin/Scroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 12
+
+[node name="EmptyState" type="Label" parent="Margin/VBox/Body/BodyMargin/Scroll/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.52, 0.6, 0.66, 1)
+theme_override_font_sizes/font_size = 14
+text = ""
+autowrap_mode = 3
+
+[node name="TeamCard" parent="Margin/VBox/Body/BodyMargin" instance=ExtResource("6_team_card")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="NationalTeamCard" parent="Margin/VBox/Body/BodyMargin" instance=ExtResource("7_national")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="PlayerCard" parent="Margin/VBox/Body/BodyMargin" instance=ExtResource("8_player_card")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="CoachCard" parent="Margin/VBox/Body/BodyMargin" instance=ExtResource("10_coach_card")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="WorldPlayersView" parent="Margin/VBox/Body/BodyMargin" instance=ExtResource("9_players")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="TransfersView" parent="Margin/VBox/Body/BodyMargin" instance=ExtResource("11_transfers")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3

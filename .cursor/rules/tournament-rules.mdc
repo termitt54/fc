@@ -1,0 +1,40 @@
+---
+description: How tournament rules and composition evolve in the world editor
+globs: scenes/world_editor/**/*competition*
+alwaysApply: true
+---
+
+# Tournament rules (world editor)
+
+## Architecture
+
+- A **tournament card** holds identity only: name, periodicity, start season, format (national / continental / international / intercontinental), and format context (country / continent / age group).
+- Do **not** put competition type on the tournament card. Type belongs to each **unit** inside the tournament.
+- Inside a tournament (edit modal only), composition is a list of units:
+  - **Дивизион** (`DIVISION`)
+  - **Кубок** (`CUP`)
+  - **Суперкубок** (`SUPER_CUP`)
+- One tournament may contain many units; each unit has its own type and (later) its own rule blocks.
+- Create modal: identity only. Rules / composition appear only when editing.
+
+## Working style
+
+- Build rules **incrementally, point by point** for each format × unit-kind × type.
+- Prefer reusing shared rule blocks when they match; write new blocks when the format needs different fields.
+- Keep the composition UI dense and card-based (header + add buttons + unit cards), similar to the reference “Состав турнира” layout.
+- Do not overbuild full rule matrices in one step — ship a thin vertical slice, then extend when asked.
+
+## Data
+
+- Persist units in `competition_units` (or successor tables), not only in UI state.
+- Keep `competitions.competition_type` only as a legacy/default DB column if needed; UI source of truth for type is the unit.
+- Per-unit shared fields so far: `foreign_players_limit` (`0` none allowed, `-1` no cap, otherwise the squad maximum), `logo_path`, club membership via `competition_unit_clubs` (checkbox picker modal).
+- Type `DIVISIONS` rule rows:
+  - structure: `divisions_count`, `teams_per_division`, `matches_vs_own`, `matches_vs_other`, `points_win`, `points_draw`, `points_loss`
+  - division unit strength: `division_strength` on the DIVISION unit itself (one coefficient, 0–1000, default 800), same scale as club reputation. Shown in «Основное» as «Сила». At season close, club and player reputation move from the preview versus the finish, scaled by this coefficient. Cups use the average reputation of the field. One tick per season, clubs first, then players; the annual club move is capped and a player's result stays inside the existing fame drift.
+  - movement totals: `teams_promote`, `teams_relegate`, `teams_playoff` — always shown
+  - scopes: `movement_scope` / `playoff_scope` = `OVERALL` (общ. табл.) or `PER_DIVISION` (кажд. див.; totals split as `total / divisions_count`)
+  - standing order: `ranking_order` JSON array of criteria codes (priority top→bottom), edited via “Места / Правила” modal
+  - `regular_season_enabled`: unified regular-season table + regular-season champion
+  - playoff section: `teams_playoff`, `playoff_scope`, `playoff_format` (`BEST_OF` / `TWO_LEGGED` / `SINGLE`), `playoff_series_wins` (2–4, only for BEST_OF), `playoff_third_place`, `playoff_seeding` (`OVERALL_TABLE` / `CROSS_SEED` / `SAME_PLACE` / `DRAW`)
+  - prizes: `prize_rules` JSON, edited via “Призовые” modal — regular/division table places plus each playoff finish (champion, runner-up, 3rd/4th, round exits). Regular and playoff amounts stack. Paid when the unit season completes.

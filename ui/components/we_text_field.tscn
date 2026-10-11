@@ -1,0 +1,24 @@
+[gd_scene format=3 uid="uid://bigeejapew8lg"]
+
+[ext_resource type="Script" path="res://ui/components/we_text_field.gd" id="1_script"]
+
+[node name="WeTextField" type="VBoxContainer"]
+theme_override_constants/separation = 6
+script = ExtResource("1_script")
+
+[node name="Label" type="Label" parent="."]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 12
+text = "Поле"
+
+[node name="Chrome" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 40)
+layout_mode = 2
+
+[node name="Input" type="LineEdit" parent="Chrome"]
+unique_name_in_owner = true
+layout_mode = 2
+flat = true
+caret_blink = true

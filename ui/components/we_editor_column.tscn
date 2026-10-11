@@ -1,0 +1,77 @@
+[gd_scene load_steps=6 format=3 uid="uid://cweeditorcol001"]
+
+[ext_resource type="Script" path="res://ui/components/we_editor_column.gd" id="1_script"]
+[ext_resource type="Script" path="res://ui/components/we_button.gd" id="2_button"]
+[ext_resource type="Script" path="res://ui/components/we_badge.gd" id="3_badge"]
+[ext_resource type="PackedScene" uid="uid://cwesearchfield01" path="res://ui/components/we_search_field.tscn" id="4_search"]
+[ext_resource type="PackedScene" uid="uid://cweentitylist01" path="res://ui/components/we_entity_list.tscn" id="5_list"]
+
+[node name="WeEditorColumn" type="PanelContainer"]
+size_flags_horizontal = 3
+size_flags_vertical = 3
+script = ExtResource("1_script")
+
+[node name="VBox" type="VBoxContainer" parent="."]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Header" type="HBoxContainer" parent="VBox"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Title" type="Label" parent="VBox/Header"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 15
+text = "Колонка"
+
+[node name="Badge" type="Label" parent="VBox/Header"]
+unique_name_in_owner = true
+layout_mode = 2
+script = ExtResource("3_badge")
+text = "0"
+
+[node name="Toolbar" type="HBoxContainer" parent="VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="CreateButton" type="Button" parent="VBox/Toolbar"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(110, 34)
+layout_mode = 2
+script = ExtResource("2_button")
+kind = 0
+text = "+ Создать"
+
+[node name="SearchField" parent="VBox/Toolbar" instance=ExtResource("4_search")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="EntityList" parent="VBox" instance=ExtResource("5_list")]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Actions" type="HBoxContainer" parent="VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="EditButton" type="Button" parent="VBox/Actions"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 34)
+layout_mode = 2
+size_flags_horizontal = 3
+script = ExtResource("2_button")
+kind = 1
+text = "Изменить"
+
+[node name="DeleteButton" type="Button" parent="VBox/Actions"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 34)
+layout_mode = 2
+size_flags_horizontal = 3
+script = ExtResource("2_button")
+kind = 2
+text = "Удалить"
