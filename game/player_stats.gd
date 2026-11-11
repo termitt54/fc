@@ -21,6 +21,24 @@ const FIELDS := [
 	"pen_missed",
 	"pen_saved",
 	"motm",
+	"shots",
+	"on_target",
+	"passes",
+	"completed_passes",
+	"receipts",
+	"miscontrols",
+	"dribbles",
+	"successful_dribbles",
+	"tackles",
+	"interceptions",
+	"blocks",
+	"crosses",
+	"completed_crosses",
+	"aerial_wins",
+	"distance_metres",
+	"catches",
+	"parries",
+
 ]
 
 const TRANSFER_FEE_KEY := "transfer_fee"
@@ -83,9 +101,14 @@ static func begin_club_stint(player: Dictionary, season: int, club_id: int, fee:
 
 ## Folds one match performance into the player's current club stint.
 static func apply_entry(player: Dictionary, entry: Dictionary, season: int, club_id: int) -> void:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		native.apply_entry_stats(player,entry,season,club_id)
+		return
 	var minutes := int(entry.get("minutes", 0))
 	if minutes <= 0:
 		return
+	record_form(player, float(entry.get("rating", 0.0)))
 	var row := _ensure_stint(player, season, club_id, false, 0)
 	row["matches"] = int(row.get("matches", 0)) + 1
 	if bool(entry.get("started", false)):
@@ -106,6 +129,8 @@ static func apply_entry(player: Dictionary, entry: Dictionary, season: int, club
 	row["pen_saved"] = int(row.get("pen_saved", 0)) + int(entry.get("pen_saved", 0))
 	if bool(entry.get("motm", false)):
 		row["motm"] = int(row.get("motm", 0)) + 1
+	for action_key in ["shots", "on_target", "passes", "completed_passes", "receipts", "miscontrols", "dribbles", "successful_dribbles", "tackles", "interceptions", "blocks", "crosses", "completed_crosses", "aerial_wins", "distance_metres", "catches", "parries"]:
+		row[action_key] = int(row.get(action_key, 0)) + int(entry.get(action_key, 0))
 	row["rating_sum"] = float(row.get("rating_sum", 0.0)) + float(entry.get("rating", 0.0))
 
 
@@ -278,3 +303,13 @@ static func _compact(row: Dictionary) -> Dictionary:
 	if row.has(TRANSFER_FEE_KEY):
 		out[TRANSFER_FEE_KEY] = maxi(0, int(row.get(TRANSFER_FEE_KEY, 0)))
 	return out
+
+
+static func record_form(player: Dictionary, rating: float) -> void:
+	if rating <= 0:
+		return
+	var recent: Array = player.get("recent_ratings", [])
+	recent.append(rating)
+	if recent.size() > 5:
+		recent.pop_front()
+	player["recent_ratings"] = recent

@@ -60,7 +60,7 @@ func _series(label: String, ca_a: int, ca_b: int, style_a: String, style_b: Stri
 	if midfield and style_b == "control":
 		# Keep A fixed; this opponent has weaker pressure than the second scenario.
 		for player in b:
-			player["attributes"]["mental"]["work_rate"] = 8
+			player["attributes"]["physical"]["stamina"] = 8
 			player["attributes"]["physical"]["stamina"] = 8
 			player["attributes"]["physical"]["pace"] = 8
 			player.erase("_match_ratings")

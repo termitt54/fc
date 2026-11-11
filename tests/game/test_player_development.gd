@@ -28,7 +28,38 @@ func _run() -> void:
 	_test_ageing_eats_physical_first()
 	_test_thirty_year_old_never_grows()
 	_test_missing_attributes_are_survivable()
+	_test_key_skill_does_not_cap_at_once()
 	_finish()
+
+
+## A top striker used to sit on finishing 20 with penalties near 10 and
+## untouched passing and stamina. Growth now spreads with diminishing returns.
+func _test_key_skill_does_not_cap_at_once() -> void:
+	var rng := _rng(61019)
+	var capped := 0
+	var stars := 0
+	var finishing: Array = []
+	var penalties: Array = []
+	var delivery: Array = []
+	var stamina: Array = []
+	for i in 160:
+		var player := _make_player(rng, PlayerTypes.POS_ST, 34, 92, 16)
+		_simulate(rng, player, 28, _setup(14, 14), 0.9)
+		if int(player["current_ability"]) < 86:
+			continue
+		stars += 1
+		var attrs: Dictionary = player["attributes"]
+		capped += 1 if int(attrs.technical.finishing) >= PlayerTypes.ATTR_MAX else 0
+		finishing.append(int(attrs.technical.finishing))
+		penalties.append(int(attrs.set_pieces.penalties))
+		delivery.append(int(attrs.set_pieces.delivery))
+		stamina.append(int(attrs.physical.stamina))
+	_assert(stars >= 40, "Enough strikers reach CA 86+ (%d)" % stars)
+	_assert(float(capped) / maxf(stars, 1) < 0.25, "Finishing 20 stays rare at CA 86+ (%d/%d)" % [capped, stars])
+	_assert(finishing.min() <= 18, "Key skill varies between players (min %d)" % finishing.min())
+	_assert(_mean(penalties) >= 15.0, "Top striker takes penalties (mean %.1f)" % _mean(penalties))
+	_assert(_mean(delivery) >= 13.0, "Top striker delivers set pieces (mean %.1f)" % _mean(delivery))
+	_assert(_mean(stamina) >= 11.0, "Secondary stamina follows the level (mean %.1f)" % _mean(stamina))
 
 
 ## The old model wrote current_ability and then recomputed it from randomly
@@ -181,7 +212,7 @@ func _test_drive_changes_growth() -> void:
 	var idle := _cohort_mean(1300, 10, 21, _setup(10, 10), PlayerTypes.PERSONALITY_MIN)
 	_assert(
 		driven - idle >= 3.0,
-		"professionalism and ambition speed a player up (%.1f CA apart)" % (driven - idle)
+		"Professional character speeds development (%.1f CA apart)" % (driven - idle)
 	)
 
 
@@ -317,10 +348,7 @@ func _setup(facility: int, coach_development: int) -> Dictionary:
 
 ## Personality is rolled at generation, so the drive scales are pinned by hand.
 func _with_drive(player: Dictionary, level: int) -> Dictionary:
-	var personality: Dictionary = player.get("personality", {})
-	for key in PlayerDevelopment.DRIVE_KEYS:
-		personality[str(key)] = level
-	player["personality"] = personality
+	player["characters"] = [PlayerTypes.CHAR_PROFESSIONAL if level > 10 else PlayerTypes.CHAR_BALANCED]
 	return player
 
 

@@ -12,6 +12,8 @@ signal coach_requested(coach_id: int)
 const CoachTypesScript := preload("res://game/coach_types.gd")
 const TacticTypesScript := preload("res://game/tactic_types.gd")
 const PlayerStatsScript := preload("res://game/player_stats.gd")
+const TransfersDialog = preload("res://scenes/game/club_transfers_dialog.gd")
+const ModalScene = preload("res://ui/components/we_modal.tscn")
 
 const LOGO_SIZE := 56
 const FLAG_SIZE := Vector2(28, 18)
@@ -168,7 +170,7 @@ func _resolve_club(unit: Dictionary, club_id: int) -> Dictionary:
 		if clubs.has(club_id):
 			_unit = other
 			return clubs[club_id]
-	return {}
+	return GameSession.get_club_identity(club_id)
 
 
 func _build_identity() -> void:
@@ -655,10 +657,7 @@ func _build_coach_card() -> PanelContainer:
 	style_line.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	style_line.add_theme_color_override("font_color", WeTokens.TEXT_MUTED)
 	style_line.add_theme_font_size_override("font_size", 11)
-	style_line.tooltip_text = "Запасной: %s · %s" % [
-		TacticTypesScript.style_label(CoachTypesScript.backup_style_of(coach)),
-		TacticTypesScript.formation_label(CoachTypesScript.backup_formation_of(coach)),
-	]
+	style_line.tooltip_text = TacticTypesScript.style_tip(CoachTypesScript.primary_style_of(coach))
 	box.add_child(style_line)
 
 	var years := int(coach.get("contract_years", 0))
@@ -773,17 +772,53 @@ func _build_transfers_card() -> PanelContainer:
 	box.add_theme_constant_override("separation", 4)
 	card.add_child(box)
 	box.add_child(_section_title("История трансферов"))
+	var detail := Button.new()
+	detail.text = "Все переходы и статистика →"
+	detail.flat = true
+	detail.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	detail.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	detail.add_theme_color_override("font_color", WeTokens.ACCENT)
+	detail.add_theme_color_override("font_hover_color", WeTokens.TEXT)
+	detail.pressed.connect(_open_transfers)
+	box.add_child(detail)
+	card.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	card.gui_input.connect(func(event: InputEvent):
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			_open_transfers()
+			card.accept_event())
 
 	var transfers := _collect_transfers()
 	if transfers.is_empty():
 		box.add_child(_hint("Трансферов пока нет"))
+		_transfer_preview_passthrough(box)
 		return card
 
 	for i in mini(transfers.size(), 6):
 		box.add_child(_transfer_row(transfers[i], i % 2 == 1))
 	if transfers.size() > 6:
 		box.add_child(_hint("и ещё %d…" % (transfers.size() - 6)))
+	_transfer_preview_passthrough(box)
 	return card
+
+
+func _transfer_preview_passthrough(node: Control) -> void:
+	if node is BaseButton:
+		return
+	node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for child in node.get_children():
+		if child is Control:
+			_transfer_preview_passthrough(child)
+
+
+func _open_transfers() -> void:
+	if _club_id < 1 or has_node("ClubTransfersDialog"):
+		return
+	var dialog := ModalScene.instantiate()
+	dialog.set_script(TransfersDialog)
+	dialog.name = "ClubTransfersDialog"
+	add_child(dialog)
+	dialog.player_requested.connect(func(id: int): player_requested.emit(id))
+	dialog.show_club(_club_id, str(_club.get("name", "Клуб")))
 
 
 func _collect_transfers() -> Array:

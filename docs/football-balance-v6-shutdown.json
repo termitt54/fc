@@ -1,0 +1,7 @@
+{
+  "action": "shutdown /s /t 0",
+  "status": "requested_by_user_after_completed_task",
+  "helper_pid": 6600,
+  "requested_at": "2026-10-16T03:46:55.5220238+03:00",
+  "delay_seconds": 20
+}

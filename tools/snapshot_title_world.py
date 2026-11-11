@@ -3,9 +3,12 @@ import json
 import sqlite3
 from pathlib import Path
 import os
+import argparse
 
 source = Path(os.environ["APPDATA"]) / "Godot/app_userdata/Новый игровой проект"
-destination = Path(__file__).resolve().parent / ".benchmark-runtime/user-snapshot"
+parser = argparse.ArgumentParser()
+parser.add_argument("--destination", type=Path, default=Path(__file__).resolve().parent / ".benchmark-runtime/user-snapshot")
+destination = parser.parse_args().destination.resolve()
 destination.mkdir(parents=True, exist_ok=True)
 metadata = {}
 for relative in ("saves/games.db", "database/world.db", "saves/autosave_history.db"):

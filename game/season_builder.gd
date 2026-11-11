@@ -8,6 +8,7 @@ const PlayoffManagerScript := preload("res://game/playoff_manager.gd")
 const YouthIntakeScript := preload("res://game/youth_intake.gd")
 const YouthGenerationConfigScript := preload("res://game/youth_generation_config.gd")
 const CoachGeneratorScript := preload("res://game/coach_generator.gd")
+const ClubRatingScript := preload("res://game/club_rating.gd")
 
 
 func build_new_game(rng: RandomNumberGenerator = null) -> Dictionary:
@@ -48,11 +49,25 @@ func build_new_game(rng: RandomNumberGenerator = null) -> Dictionary:
 			continue
 		for unit in units_result["data"]:
 			var unit_id: int = int(unit.get("id", 0))
-			var club_ids_result := unit_repo.get_club_ids(unit_id)
+			var national := str(competition.get("scope_type", "")) == CompetitionTypes.SCOPE_INTERNATIONAL
+			if national and str(competition.get("age_group", CompetitionTypes.AGE_SENIOR)) != CompetitionTypes.AGE_SENIOR:
+				continue
+			var club_ids_result := unit_repo.get_country_ids(unit_id) if national else unit_repo.get_club_ids(unit_id)
 			var club_ids: Array = club_ids_result["data"] if club_ids_result["success"] else []
-			var clubs_by_id := _load_clubs(club_ids)
-			for club_id in clubs_by_id.keys():
-				all_clubs[int(club_id)] = clubs_by_id[club_id]
+			var clubs_by_id: Dictionary = {}
+			if national:
+				var team_ids: Array = []
+				for cid in club_ids:
+					var loaded := CountryRepository.new().get_by_id(int(cid))
+					if loaded["success"]:
+						var team := NationalTeams.identity(loaded["data"])
+						clubs_by_id[int(team["id"])] = team
+						team_ids.append(int(team["id"]))
+				club_ids = team_ids
+			else:
+				clubs_by_id = _load_clubs(club_ids)
+				for club_id in clubs_by_id.keys():
+					all_clubs[int(club_id)] = clubs_by_id[club_id]
 			pending_units.append({
 				"competition": competition,
 				"unit": unit,
@@ -68,19 +83,22 @@ func build_new_game(rng: RandomNumberGenerator = null) -> Dictionary:
 	var players_by_club: Dictionary = detached.get("players_by_club", {})
 	var free_agents: Array = detached.get("free_agents", [])
 	var youth_players_by_club: Dictionary = generated.get("youth_players_by_club", {})
+	var reserve_players_by_club: Dictionary = generated.get("reserve_players_by_club", {})
 	var id_state: Dictionary = generated.get("id_state", {"next_id": 1})
 	var coach_id_state := {"next_id": 1}
 	var coaches_by_club: Dictionary = CoachGeneratorScript.generate_for_clubs(
 		all_clubs, rng, {}, coach_id_state, maxi(season_number, 1)
 	)
 
+	var initial_elos := _initial_club_elos(pending_units)
 	for spec in pending_units:
 		seasons.append(_build_unit_season(
 			spec["competition"],
 			spec["unit"],
 			spec["clubs_by_id"],
 			spec["club_ids"],
-			rng
+			rng,
+			initial_elos
 		))
 
 	return DbResult.ok({
@@ -89,6 +107,7 @@ func build_new_game(rng: RandomNumberGenerator = null) -> Dictionary:
 		"units": seasons,
 		"players_by_club": players_by_club,
 		"youth_players_by_club": youth_players_by_club,
+		"reserve_players_by_club": reserve_players_by_club,
 		"free_agents": free_agents,
 		"coaches_by_club": coaches_by_club,
 		"next_player_id": int(id_state.get("next_id", 1)),
@@ -101,7 +120,8 @@ func _build_unit_season(
 	unit: Dictionary,
 	clubs_by_id: Dictionary,
 	club_ids: Array,
-	rng: RandomNumberGenerator = null
+	rng: RandomNumberGenerator = null,
+	initial_elos: Dictionary = {}
 ) -> Dictionary:
 	var unit_id: int = int(unit.get("id", 0))
 
@@ -109,6 +129,15 @@ func _build_unit_season(
 	var divisions: Array = []
 	var matches: Array = []
 
+	var national := str(competition.get("scope_type", "")) == CompetitionTypes.SCOPE_INTERNATIONAL
+	if national and competition_type in [CompetitionTypes.TYPE_LEAGUE, CompetitionTypes.TYPE_DIVISIONS, CompetitionTypes.TYPE_GROUP_AND_PLAYOFF]:
+		unit = InternationalDraw.normalize(unit)
+		unit["divisions_count"] = clampi(int(unit.get("divisions_count", 2)), 1, maxi(1, int(club_ids.size() / 2)))
+		unit["teams_per_division"] = maxi(1, ceili(float(club_ids.size()) / int(unit["divisions_count"])))
+		competition_type = CompetitionTypes.TYPE_GROUP_AND_PLAYOFF
+	var groups_playoff := national and competition_type == CompetitionTypes.TYPE_GROUP_AND_PLAYOFF
+	if groups_playoff:
+		competition_type = CompetitionTypes.TYPE_DIVISIONS
 	if competition_type == CompetitionTypes.TYPE_DIVISIONS:
 		var generated: Dictionary = FixtureGeneratorScript.build_regular_season(
 			club_ids,
@@ -116,7 +145,10 @@ func _build_unit_season(
 			int(unit.get("teams_per_division", CompetitionUnitRepository.TEAMS_PER_DIVISION_DEFAULT)),
 			int(unit.get("matches_vs_own", CompetitionUnitRepository.MATCHES_VS_OWN_DEFAULT)),
 			int(unit.get("matches_vs_other", CompetitionUnitRepository.MATCHES_VS_OTHER_DEFAULT)),
-			rng
+			rng,
+			[],
+			str(unit.get("division_sort", "")),
+			FixtureGeneratorScript.division_scores_of(club_ids, clubs_by_id, str(unit.get("division_sort", "")), ClubRatingScript.strength_of({"rules": unit}), initial_elos)
 		)
 		divisions = generated["divisions"]
 		matches = generated["matches"]
@@ -126,15 +158,19 @@ func _build_unit_season(
 
 	var standings := _build_standings(divisions)
 	var teams_playoff: int = int(unit.get("teams_playoff", 0))
-	var playoff_enabled := teams_playoff > 0 and competition_type == CompetitionTypes.TYPE_DIVISIONS
+	if groups_playoff:
+		teams_playoff = InternationalDraw.qualifier_count(club_ids.size(), divisions.size(), teams_playoff)
+	if national and competition_type in [CompetitionTypes.TYPE_CUP, CompetitionTypes.TYPE_SUPER_CUP, CompetitionTypes.TYPE_KNOCKOUT]:
+		teams_playoff = club_ids.size()
+	var playoff_enabled := teams_playoff > 0 and (competition_type == CompetitionTypes.TYPE_DIVISIONS or national)
 	var playoff := {
 		"enabled": playoff_enabled,
 		"teams": teams_playoff,
 		"format": str(unit.get("playoff_format", PlayoffRules.FORMAT_DEFAULT)),
 		"series_wins": int(unit.get("playoff_series_wins", PlayoffRules.SERIES_WINS_DEFAULT)),
-		"third_place": bool(unit.get("playoff_third_place", false)),
+		"third_place": national or bool(unit.get("playoff_third_place", false)),
 		"seeding": str(unit.get("playoff_seeding", PlayoffRules.SEEDING_DEFAULT)),
-		"scope": str(unit.get("playoff_scope", CompetitionUnitRepository.PLAYOFF_SCOPE_DEFAULT)),
+		"scope": CompetitionUnitRepository.SCOPE_OVERALL if national and competition_type != CompetitionTypes.TYPE_DIVISIONS else str(unit.get("playoff_scope", CompetitionUnitRepository.PLAYOFF_SCOPE_DEFAULT)),
 		"slots": [],
 		"matches": [],
 		"series": [],
@@ -147,6 +183,10 @@ func _build_unit_season(
 	return {
 		"id": unit_id,
 		"competition_id": int(competition.get("id", 0)),
+		"national": national,
+		"international_started": false,
+		"periodicity": str(competition.get("periodicity", CompetitionTypes.PERIOD_ANNUAL)),
+		"start_season": int(competition.get("start_season", 1)),
 		"competition_name": str(competition.get("name", "")),
 		"competition_short_name": str(competition.get("short_name", "")),
 		"name": str(unit.get("name", "")),
@@ -163,6 +203,17 @@ func _build_unit_season(
 		"clubs_by_id": clubs_by_id,
 		"estimated_days": _estimate_unit_days(matches, playoff),
 	}
+
+
+func _initial_club_elos(pending_units: Array) -> Dictionary:
+	var rating_units: Array = []
+	for spec in pending_units:
+		if str(spec.competition.get("scope_type", "")) == CompetitionTypes.SCOPE_INTERNATIONAL:
+			continue
+		var unit: Dictionary = spec.unit
+		rating_units.append({"id": int(unit.get("id", 0)), "unit_kind": str(unit.get("unit_kind", "")),
+			"competition_type": str(unit.get("competition_type", "")), "rules": unit, "clubs_by_id": spec.clubs_by_id})
+	return ClubRatingScript.starting_strengths(rating_units)
 
 
 func _estimate_unit_days(matches: Array, playoff: Dictionary) -> int:
@@ -187,9 +238,17 @@ func _generate_all_players(clubs_by_id: Dictionary, rng: RandomNumberGenerator) 
 	var first_team: Dictionary = YouthIntakeScript.generate_first_team_squads(
 		clubs, countries_by_id, rng, id_state, name_pool_cache
 	)
+	# A new world also has previous academy generations. Otherwise retirement
+	# starts immediately while the first replacement cohort is still 15–17.
+	var youth := YouthIntakeScript.generate_youth_intake(clubs, countries_by_id, rng, id_state, name_pool_cache)
+	var reserves := YouthIntakeScript.generate(clubs, countries_by_id, rng, id_state, name_pool_cache, {"mode": YouthIntakeScript.MODE_RESERVE})
+	for squad in reserves.values():
+		for player in squad:
+			YouthGraduation.prepare_reserve(player)
 	return {
 		"players_by_club": first_team,
-		"youth_players_by_club": {},
+		"youth_players_by_club": youth,
+		"reserve_players_by_club": reserves,
 		"id_state": id_state,
 	}
 

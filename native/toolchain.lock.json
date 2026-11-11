@@ -1,0 +1,9 @@
+{
+  "godot_cpp_repository": "https://github.com/godotengine/godot-cpp.git",
+  "godot_cpp_branch": "4.5",
+  "godot_cpp_commit": "27d9dd23c83871e0619fca5dc2cddfbfd69e926a",
+  "compiler_directory": "llvm-mingw-20261006-ucrt-x86_64",
+  "compiler_url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20261006/llvm-mingw-20261006-ucrt-x86_64.zip",
+  "compiler_sha256": "317492c456aa27ee607a5919f1d2d38dcdc1112516a24d0bf4b00d078f52d17a",
+  "scons_version": "4.11.1"
+}

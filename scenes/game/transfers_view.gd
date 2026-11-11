@@ -13,6 +13,12 @@ const WeSelectScene := preload("res://ui/components/we_select_field.tscn")
 
 const ALL_SEASONS := 0
 const ListPageScript := preload("res://game/list_page.gd")
+const ClubHistory = preload("res://game/club_transfer_history.gd")
+var _club_id := 0
+var _filters := {"direction": "all", "payment": "all", "position": "all", "query": "", "min_fee": 0, "max_fee": 0}
+var _stats_host: VBoxContainer
+var _club_log: Array = []
+var _club_log_size := -1
 
 const COLUMNS := [
 	{"key": "season", "label": "Сезон", "width": 88.0, "numeric": true},
@@ -48,14 +54,160 @@ func _ready() -> void:
 	_build_chrome()
 
 
+func set_club(club_id: int) -> void:
+	_club_id = club_id
+	_club_log_size = -1
+	_sort_key = "season"
+	_sort_asc = false
+	_title_label.text = "Переходы клуба"
+	_build_club_filters()
+	refresh()
+
+
+func _build_club_filters() -> void:
+	if _stats_host != null:
+		return
+	var host := VBoxContainer.new()
+	host.add_theme_constant_override("separation", 10)
+	add_child(host)
+	move_child(host, 1)
+	_stats_host = VBoxContainer.new()
+	_stats_host.add_theme_constant_override("separation", 8)
+	host.add_child(_stats_host)
+	var filter_row := HBoxContainer.new()
+	filter_row.add_theme_constant_override("separation", 10)
+	host.add_child(filter_row)
+	var search := _filter_input("Игрок или другой клуб", "Поиск по имени игрока и контрагенту")
+	search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	filter_row.add_child(search)
+	search.text_changed.connect(func(text: String):
+		_filters.query = text
+		refresh())
+	_add_filter_select(filter_row, "Направление", "direction", [
+		{"id": "all", "label": "Все переходы"}, {"id": "in", "label": "Пришли"},
+		{"id": "out", "label": "Ушли"}, {"id": "bid", "label": "Отклонённые предложения"}])
+	_add_filter_select(filter_row, "Оплата", "payment", [
+		{"id": "all", "label": "Любая сумма"}, {"id": "paid", "label": "За деньги"}, {"id": "free", "label": "Без оплаты"}])
+	var positions: Array = [{"id": "all", "label": "Все позиции"}]
+	for position in PlayerTypesScript.POSITIONS:
+		positions.append({"id": position, "label": PlayerTypesScript.position_label(position)})
+	_add_filter_select(filter_row, "Позиция", "position", positions)
+	var amounts := HBoxContainer.new()
+	amounts.add_theme_constant_override("separation", 10)
+	host.add_child(amounts)
+	for key in ["min_fee", "max_fee"]:
+		var field := _filter_input("Сумма от, €" if key == "min_fee" else "Сумма до, €", "Полная сумма в евро; пустое поле снимает границу")
+		field.custom_minimum_size.x = 180
+		amounts.add_child(field)
+		field.text_changed.connect(func(text: String):
+			var numeric := text.replace(" ", "").replace("€", "").strip_edges()
+			_filters[key] = maxi(0, int(numeric)) if numeric.is_valid_int() else 0
+			refresh())
+	var hint := Label.new()
+	hint.text = "Сводка учитывает выбранные фильтры. Предложения не входят в доходы и расходы."
+	hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
+	hint.add_theme_font_size_override("font_size", 12)
+	amounts.add_child(hint)
+	var reset := _page_button("Сбросить")
+	reset.pressed.connect(func():
+		_season_filter = ALL_SEASONS
+		_option_ids = []
+		_filters = {"direction": "all", "payment": "all", "position": "all", "query": "", "min_fee": 0, "max_fee": 0}
+		_stats_host = null
+		remove_child(host)
+		host.queue_free()
+		_build_club_filters()
+		refresh())
+	amounts.add_child(reset)
+
+
+func _filter_input(placeholder: String, hint: String) -> LineEdit:
+	var field := LineEdit.new()
+	field.placeholder_text = placeholder
+	field.tooltip_text = hint
+	field.custom_minimum_size = Vector2(180, 36)
+	field.add_theme_stylebox_override("normal", WeTokens.panel(WeTokens.INSET, WeTokens.BORDER, WeTokens.RADIUS_SM, 8))
+	field.add_theme_stylebox_override("focus", WeTokens.panel(WeTokens.INSET, WeTokens.ACCENT, WeTokens.RADIUS_SM, 8))
+	field.add_theme_color_override("font_color", WeTokens.TEXT)
+	field.add_theme_font_size_override("font_size", 13)
+	return field
+
+
+func _add_filter_select(host: HBoxContainer, title: String, key: String, items: Array) -> void:
+	var select := WeSelectScene.instantiate() as WeSelectField
+	select.label = title
+	select.compact = true
+	select.custom_minimum_size.x = 190 if key == "direction" else 160
+	host.add_child(select)
+	select.set_items(items, "all")
+	select.item_selected.connect(func(_index: int):
+		_filters[key] = str(select.selected_id)
+		refresh())
+
+
+func _refresh_stats() -> void:
+	if _stats_host == null:
+		return
+	for child in _stats_host.get_children():
+		child.free()
+	var stats := ClubHistory.summary(_rows)
+	var grid := GridContainer.new()
+	grid.columns = 6
+	grid.add_theme_constant_override("h_separation", 10)
+	_stats_host.add_child(grid)
+	for item in [["Пришли", str(stats.incoming)], ["Ушли", str(stats.outgoing)],
+		["Потрачено", _format_fee(stats.spent)], ["Получено", _format_fee(stats.earned)],
+		["Баланс", ("−" if stats.balance < 0 else "+") + _format_fee(absi(stats.balance))],
+		["Платные покупки", "%.1f%%" % stats.paid_percent]]:
+		var card := PanelContainer.new()
+		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		card.add_theme_stylebox_override("panel", WeTokens.panel(WeTokens.INSET, WeTokens.BORDER, WeTokens.RADIUS_SM, 12))
+		grid.add_child(card)
+		var box := VBoxContainer.new()
+		box.add_theme_constant_override("separation", 5)
+		card.add_child(box)
+		var caption := Label.new()
+		caption.text = item[0]
+		caption.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
+		caption.add_theme_font_size_override("font_size", 12)
+		box.add_child(caption)
+		var value := Label.new()
+		value.text = item[1]
+		value.add_theme_color_override("font_color", WeTokens.ACCENT)
+		value.add_theme_font_size_override("font_size", 21)
+		box.add_child(value)
+	var records := Label.new()
+	records.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	records.text = "Рекорд покупки: %s     ·     Рекорд продажи: %s     ·     Средняя платная покупка: %s     ·     Предложений: %d" % [_format_fee(stats.record_purchase), _format_fee(stats.record_sale), _format_fee(int(stats.average_purchase)), stats.bids]
+	records.add_theme_color_override("font_color", WeTokens.TEXT_MUTED)
+	records.add_theme_font_size_override("font_size", 12)
+	_stats_host.add_child(records)
+
+
 func is_open() -> bool:
 	return visible
 
 
 func refresh() -> void:
 	var log: Array = GameSession.transfer_log
-	_sync_season_filter(_season_options(log, int(GameSession.season_number)))
-	_rows = deal_rows(log, _season_filter)
+	if _club_id > 0:
+		# Scope once when the journal changes: filtering must not rescan the world.
+		if _club_log_size != log.size():
+			_club_log = []
+			for entry in log:
+				if typeof(entry) == TYPE_DICTIONARY and int(entry.get("club_id", 0)) == _club_id:
+					_club_log.append(entry)
+			_club_log_size = log.size()
+		log = _club_log
+	_sync_season_filter(_season_options(log, int(GameSession.season_number), _club_id))
+	if _club_id > 0:
+		_filters["season"] = _season_filter
+		_rows = ClubHistory.rows(log, _club_id, _filters)
+		_refresh_stats()
+	else:
+		_rows = deal_rows(log, _season_filter)
 	_page = 0
 	sort_deals(_rows, _sort_key, _sort_asc)
 	_rebuild_header()
@@ -120,14 +272,16 @@ static func _compare(a: Dictionary, b: Dictionary, key: String) -> int:
 	return str(left).nocasecmp_to(str(right))
 
 
-static func _season_options(log: Array, current_season: int) -> Array:
+static func _season_options(log: Array, current_season: int, club_id: int = 0) -> Array:
 	var seen := {}
 	if current_season > 0:
 		seen[current_season] = true
 	for entry in log:
 		if typeof(entry) != TYPE_DICTIONARY:
 			continue
-		if str(entry.get("direction", "")) != "in":
+		if club_id > 0 and int(entry.get("club_id", 0)) != club_id:
+			continue
+		if club_id == 0 and str(entry.get("direction", "")) != "in":
 			continue
 		var season := int(entry.get("season", 0))
 		if season > 0:
@@ -288,6 +442,8 @@ func _rebuild_list() -> void:
 	if _rows.is_empty():
 		var empty := Label.new()
 		empty.text = "В этом сезоне трансферов не было." if _season_filter > ALL_SEASONS else "Трансферов ещё не было."
+		if _club_id > 0:
+			empty.text = "По выбранным фильтрам записей не найдено."
 		empty.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
 		empty.add_theme_font_size_override("font_size", 13)
 		_list_host.add_child(empty)
@@ -368,14 +524,20 @@ func _make_row(row: Dictionary, zebra: bool) -> PanelContainer:
 	panel.add_child(cols)
 
 	cols.add_child(_text_cell("Сезон %d" % int(row.get("season", 0)), 88.0, WeTokens.TEXT_MUTED))
-	cols.add_child(_link_cell(
-		str(row.get("player_name", "Игрок")),
+	var direction := str(row.get("direction", ""))
+	var prefix := {"in": "↙  ", "out": "↗  ", "bid": "↔  "}.get(direction, "") as String
+	var player_cell := _link_cell(
+		prefix + str(row.get("player_name", "Игрок")),
 		0.0,
 		func(): player_requested.emit(int(row.get("player_id", 0)))
-	))
+	)
+	if not direction.is_empty():
+		player_cell.add_theme_color_override("font_color", WeTokens.SUCCESS if direction == "in" else (WeTokens.DANGER if direction == "out" else WeTokens.TEXT_DIM))
+		player_cell.tooltip_text = {"in": "Пришёл", "out": "Ушёл", "bid": "Предложение не состоялось"}.get(direction, "") + " · день %d" % int(row.get("day", 0))
+	cols.add_child(player_cell)
 	cols.add_child(_text_cell(_position_text(str(row.get("position", ""))), 48.0, WeTokens.TEXT_MUTED))
 	cols.add_child(_text_cell(str(row.get("from", "—")), 160.0, WeTokens.TEXT))
-	var club_id := int(row.get("club_id", 0))
+	var club_id := int(row.get("to_club_id", row.get("club_id", 0)))
 	if club_id > 0:
 		cols.add_child(_link_cell(str(row.get("to", "—")), 160.0, func(): club_requested.emit(club_id)))
 	else:
@@ -432,6 +594,8 @@ func _position_text(code: String) -> String:
 
 
 func _count_text(count: int) -> String:
+	if _club_id > 0:
+		return "Записей: %d" % count
 	var mod10 := count % 10
 	var mod100 := count % 100
 	var word := "трансферов"

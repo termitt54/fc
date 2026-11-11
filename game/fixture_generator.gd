@@ -11,14 +11,17 @@ static func build_regular_season(
 	teams_per_division: int,
 	matches_vs_own: int,
 	matches_vs_other: int,
-	rng: RandomNumberGenerator = null
+	rng: RandomNumberGenerator = null,
+	assigned_divisions: Array = [],
+	division_sort: String = "",
+	reputations: Dictionary = {}
 ) -> Dictionary:
 	if rng == null:
 		rng = RandomNumberGenerator.new()
 		rng.randomize()
 	var div_count: int = maxi(divisions_count, 1)
 	var per_div: int = maxi(teams_per_division, 1)
-	var divisions: Array = _assign_divisions(club_ids, div_count, per_div)
+	var divisions: Array = assigned_divisions.duplicate(true) if not assigned_divisions.is_empty() else assign_divisions(club_ids, div_count, per_div, division_sort, reputations, rng)
 	var specs: Array = []
 	specs.append_array(_own_division_specs(divisions, matches_vs_own))
 	specs.append_array(_cross_division_specs(divisions, matches_vs_other))
@@ -28,24 +31,76 @@ static func build_regular_season(
 	}
 
 
-static func _assign_divisions(club_ids: Array, div_count: int, per_div: int) -> Array:
+## Deal clubs across divisions. Reputation/Elo order stripes them: the strongest
+## goes to division 1, the next to division 2, then back to division 1.
+## Random shuffles first, then uses the same stripe, so pools stay even.
+static func reputations_of(club_ids: Array, clubs_by_id: Dictionary) -> Dictionary:
+	var out := {}
+	for raw_id in club_ids:
+		var id := int(raw_id)
+		var club: Variant = clubs_by_id.get(id, {})
+		if typeof(club) != TYPE_DICTIONARY:
+			club = clubs_by_id.get(str(id), {})
+		out[id] = int(club.get("reputation", 0)) if typeof(club) == TYPE_DICTIONARY else 0
+	return out
+
+
+## Ranking values for the chosen draw rule. Never substitutes prestige for Elo.
+## New worlds have no played rating yet, so use the same championship seed as
+## ClubRating; callers may supply the per-club seed when clubs also enter cups.
+static func division_scores_of(club_ids: Array, clubs_by_id: Dictionary, mode: String, initial_elo: float = 500.0, initial_by_club: Dictionary = {}) -> Dictionary:
+	if CompetitionUnitRepository.normalize_division_sort(mode) != CompetitionUnitRepository.DIVISION_SORT_ELO:
+		return reputations_of(club_ids, clubs_by_id)
+	var result := {}
+	for raw_id in club_ids:
+		var id := int(raw_id)
+		var club: Dictionary = clubs_by_id.get(id, clubs_by_id.get(str(id), {}))
+		var stored: Dictionary = club.get("club_elo", {})
+		var fallback := float(initial_by_club.get(id, initial_by_club.get(str(id), initial_elo)))
+		var value := float(stored.get("elo", club.get("elo", fallback)))
+		result[id] = maxf(0.0, value if is_finite(value) else fallback)
+	return result
+
+
+static func assign_divisions(
+	club_ids: Array,
+	div_count: int,
+	_per_div: int,
+	division_sort: String = "",
+	reputations: Dictionary = {},
+	rng: RandomNumberGenerator = null
+) -> Array:
+	# `reputations` is the legacy argument name; it contains the selected
+	# ranking values, including actual club Elo in ELO mode.
+	var count := maxi(div_count, 1)
 	var divisions: Array = []
-	for d in div_count:
+	for d in count:
 		divisions.append({"index": d, "club_ids": []})
 
-	var ordered: Array = club_ids.duplicate()
-	var capacity := div_count * maxi(per_div, 1)
+	var ordered: Array = []
+	for raw_id in club_ids:
+		var club_id := int(raw_id)
+		if club_id > 0:
+			ordered.append(club_id)
+	if CompetitionUnitRepository.normalize_division_sort(division_sort) in [CompetitionUnitRepository.DIVISION_SORT_REPUTATION, CompetitionUnitRepository.DIVISION_SORT_ELO]:
+		ordered.sort_custom(func(a: int, b: int) -> bool:
+			var left := float(reputations.get(a, reputations.get(str(a), 0)))
+			var right := float(reputations.get(b, reputations.get(str(b), 0)))
+			if left != right:
+				return left > right
+			return a < b
+		)
+	else:
+		if rng == null:
+			rng = RandomNumberGenerator.new()
+			rng.randomize()
+		for i in range(ordered.size() - 1, 0, -1):
+			var swap := rng.randi_range(0, i)
+			var tmp: int = ordered[i]
+			ordered[i] = ordered[swap]
+			ordered[swap] = tmp
 	for i in ordered.size():
-		var club_id: int = int(ordered[i])
-		if club_id < 1:
-			continue
-		var div_index: int
-		if ordered.size() <= capacity:
-			div_index = mini(int(i / maxi(per_div, 1)), div_count - 1)
-		else:
-			# Extra clubs: spread evenly so every team still plays.
-			div_index = i % div_count
-		(divisions[div_index]["club_ids"] as Array).append(club_id)
+		(divisions[i % count]["club_ids"] as Array).append(int(ordered[i]))
 	return divisions
 
 

@@ -76,7 +76,7 @@ static func seeding_full_label(code: String) -> String:
 		SEEDING_OVERALL:
 			return "Общая таблица (1 играет с N, половины сетки не пересекаются до финала)"
 		SEEDING_CROSS:
-			return "Два дивизиона: перекрёстный посев (1А — худший из Б…)"
+			return "Два дивизиона: перекрёстный посев, лидеры А и Б в разных половинах сетки"
 		SEEDING_SAME_PLACE:
 			return "Два дивизиона: одинаковые места (1А — 1Б…)"
 		SEEDING_DRAW:

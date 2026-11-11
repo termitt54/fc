@@ -16,11 +16,65 @@ func _ready() -> void:
 func _run() -> void:
 	print("=== Playoff bracket tests ===")
 	_test_overall_seeds_sit_on_opposite_halves()
+	_test_cross_group_wings()
 	_test_winners_stay_on_the_same_wing()
 	_test_right_wing_team_does_not_jump_left()
 	_test_season_result_keeps_playoff_and_table()
+	_test_qualifier_ids_follow_scope()
+	_test_standings_table_zones()
 	_test_history_view_builds()
 	_finish()
+
+
+func _cross_unit(per_group: int) -> Dictionary:
+	var unit := {"id": 11, "rules": {}, "clubs_by_id": {}, "matches": [], "standings": [], "divisions": [{"index": 0, "club_ids": []}, {"index": 1, "club_ids": []}], "playoff": {"enabled": true, "teams": per_group * 2, "format": PlayoffRules.FORMAT_SINGLE, "scope": "PER_DIVISION", "seeding": PlayoffRules.SEEDING_CROSS}, "winners": []}
+	for group in 2:
+		for rank in range(1, per_group + 1):
+			var id := group * 100 + rank
+			unit["divisions"][group]["club_ids"].append(id)
+			unit["clubs_by_id"][id] = {"id": id, "name": "%s%d" % ["A" if group == 0 else "B", rank]}
+			unit["standings"].append({"club_id": id, "division": group, "points": (per_group - rank + 1) * 3})
+	return unit
+
+
+func _test_cross_group_wings() -> void:
+	var unit := _cross_unit(8)
+	var started := PlayoffManagerScript.maybe_start(unit, 10, 1)
+	var expected := [[1, 108], [3, 106], [2, 107], [4, 105], [101, 8], [103, 6], [102, 7], [104, 5]]
+	var first := _series_of_round(unit, 1)
+	_assert(first.size() == expected.size(), "cross seeding creates eight matches for sixteen qualifiers")
+	for i in mini(first.size(), expected.size()):
+		_assert(_pair_of(first[i]) == expected[i] and int(first[i]["slot"]) == i, "cross slot %d matches the requested A/B order" % i)
+	_finish_current_round(unit, func(series): return int(series["home_id"]))
+	var progressed := PlayoffManagerScript.after_day_simulated(unit, 11, int(started["next_match_id"]), 1)
+	var quarters := _series_of_round(unit, 2)
+	_assert(quarters.size() == 4 and _pair_of(quarters[0]) == [1, 3] and _pair_of(quarters[1]) == [2, 4], "A1 and A2 enter separate quarterfinals")
+	_assert(_pair_of(quarters[2]) == [101, 103] and _pair_of(quarters[3]) == [102, 104], "B1 and B2 enter separate quarterfinals")
+	_finish_current_round(unit, func(series): return int(series["home_id"]))
+	progressed = PlayoffManagerScript.after_day_simulated(unit, 12, int(progressed["next_match_id"]), 1)
+	var semis := _series_of_round(unit, 3)
+	_assert(_pair_of(semis[0]) == [1, 2] and _pair_of(semis[1]) == [101, 102], "group leaders can meet their runner-up only in the semifinal")
+	_finish_current_round(unit, func(series): return int(series["home_id"]))
+	PlayoffManagerScript.after_day_simulated(unit, 13, int(progressed["next_match_id"]), 1)
+	_assert(_pair_of(_series_of_round(unit, 4)[0]) == [1, 101], "A1 and B1 remain apart until the final")
+	for per_group in [1, 2, 4, 16]:
+		var scaled := _cross_unit(per_group)
+		PlayoffManagerScript.maybe_start(scaled, 1, 1)
+		var seen: Array = []
+		for series in _series_of_round(scaled, 1):
+			seen.append_array(_pair_of(series))
+		seen.sort()
+		var qualifiers := PlayoffManagerScript.qualifier_ids(scaled)
+		qualifiers.sort()
+		_assert(seen == qualifiers, "cross seeding includes each qualifier once: %d teams" % (per_group * 2))
+	var unequal := _cross_unit(4)
+	var eligible: Array = [1, 2, 3, 101]
+	var fallback := PlayoffManagerScript._cross_seed_pairs(unequal, eligible)
+	var seen: Array = []
+	for pair in fallback:
+		seen.append_array([pair["home_id"], pair["away_id"]])
+	seen.sort()
+	_assert(seen == eligible, "unequal groups never admit a team which did not qualify")
 
 
 func _test_overall_seeds_sit_on_opposite_halves() -> void:
@@ -194,6 +248,62 @@ func _test_season_result_keeps_playoff_and_table() -> void:
 	_assert(int(league["winners"][0].get("club_id", 0)) == 1, "the table leader is the recorded champion")
 
 
+func _test_qualifier_ids_follow_scope() -> void:
+	var unit := _eight_team_unit()
+	unit["playoff"]["teams"] = 4
+	_assert(PlayoffManagerScript.qualifier_ids(unit) == [1, 2, 3, 4], "overall playoff marks the top of the table")
+	unit["playoff"]["enabled"] = false
+	_assert(PlayoffManagerScript.qualifier_ids(unit).is_empty(), "a disabled playoff marks nobody")
+
+	unit = _eight_team_unit()
+	unit["divisions"] = [
+		{"index": 0, "club_ids": [1, 2, 3, 4]},
+		{"index": 1, "club_ids": [5, 6, 7, 8]},
+	]
+	for row in unit["standings"]:
+		if int(row["club_id"]) > 4:
+			row["division"] = 1
+	unit["playoff"]["teams"] = 4
+	unit["playoff"]["scope"] = CompetitionUnitRepository.SCOPE_PER_DIVISION
+	_assert(PlayoffManagerScript.qualifier_ids(unit) == [1, 2, 5, 6], "each division sends its own top clubs")
+
+
+func _test_standings_table_zones() -> void:
+	var was_active := GameSession.is_active
+	GameSession.is_active = true
+	var screen: Control = load("res://scenes/game/game_screen.tscn").instantiate()
+	add_child(screen)
+	var unit := _eight_team_unit()
+	unit["divisions"] = [
+		{"index": 0, "club_ids": [1, 2, 3, 4]},
+		{"index": 1, "club_ids": [5, 6, 7, 8]},
+	]
+	for row in unit["standings"]:
+		if int(row["club_id"]) > 4:
+			row["division"] = 1
+	unit["rules"]["teams_promote"] = 1
+	unit["rules"]["teams_relegate"] = 1
+	unit["rules"]["movement_scope"] = "OVERALL"
+	unit["playoff"]["teams"] = 4
+	unit["playoff"]["scope"] = "OVERALL"
+	screen._table_mode = screen.TABLE_MODE_DIVISIONS
+	screen._clear_content()
+	screen._build_table_view(unit)
+	var content: Node = screen.get_node("%Content")
+	var text := _gather_text(content)
+	_assert("Дивизионы" in text and "Общая таблица" in text, "table mode is a compact switch")
+	_assert("Вид таблицы" not in text, "the stretched table select is gone")
+	_assert(content.find_children("*", "WeSelectField", true, false).is_empty(), "the table page does not host a select")
+	_assert("Повышение" in text and "Плей-офф" in text and "Понижение" in text, "legend names promotion, playoff and relegation")
+	_assert("Дивизион 1" in text and "Дивизион 2" in text, "division titles sit on the cards")
+	var zones: Dictionary = screen._standing_zones(unit)
+	_assert(str(zones.get(1, "")) == "promote", "the combined leader is in the promotion zone")
+	_assert(str(zones.get(2, "")) == "playoff" and str(zones.get(4, "")) == "playoff", "the next overall places stay in the playoff")
+	_assert(str(zones.get(8, "")) == "relegate", "the last club is in the relegation zone")
+	screen.queue_free()
+	GameSession.is_active = was_active
+
+
 func _test_history_view_builds() -> void:
 	var was_active := GameSession.is_active
 	GameSession.is_active = true
@@ -229,15 +339,67 @@ func _test_history_view_builds() -> void:
 			{"season": 1, "club_id": 1, "club_name": "Альфа", "place": 1},
 		],
 	}
+	var entries: Array = screen._history_entries(unit["winners"])
+	var playoff_medals: Array = screen._history_medal_rows(entries, "playoff")
+	var regular_medals: Array = screen._history_medal_rows(entries, "regular")
+	_assert(playoff_medals.size() == 3, "fourth place is not a medal")
+	_assert(int(playoff_medals[0].get("club_id", 0)) == 1 and int(playoff_medals[0].get("gold", 0)) == 2, "legacy champion and playoff winner both count as gold")
+	_assert(int(playoff_medals[1].get("club_id", 0)) == 2 and int(playoff_medals[1].get("silver", 0)) == 1, "playoff runner-up is silver")
+	_assert(int(playoff_medals[2].get("club_id", 0)) == 3 and int(playoff_medals[2].get("bronze", 0)) == 1, "playoff third is bronze")
+	_assert(regular_medals.size() == 3, "regular season keeps its own medal table")
+	_assert(int(regular_medals[0].get("gold", 0)) == 1 and int(regular_medals[1].get("silver", 0)) == 1 and int(regular_medals[2].get("bronze", 0)) == 1, "regular medals follow the table")
+	screen._history_tab = 0
+	screen._clear_content()
+	screen._build_history_view(unit)
+	var medals_text := _gather_text(screen.get_node("%Content"))
+	_assert(medals_text.find("Медали") >= 0 and medals_text.find("Медали") < medals_text.find("История сезонов"), "medals and season history are separate tabs")
+	_assert(medals_text.find("Плей-офф") < medals_text.find("Регулярный сезон"), "both competitions stay side by side")
+	_assert(_labels_starting(screen.get_node("%Content"), "Сезон ").is_empty(), "the medals tab does not list seasons")
+	_assert("Дельта" not in medals_text, "fourth place stays out of the medal tables")
+	_assert(not ("40" in medals_text) and not ("+12" in medals_text), "medal rows have no points or goal difference")
+	screen._history_tab = 1
 	screen._clear_content()
 	screen._build_history_view(unit)
 	var text := _gather_text(screen.get_node("%Content"))
-	_assert(text.find("Сезон 3") >= 0 and text.find("Сезон 3") < text.find("Сезон 1"), "newer season is first")
-	_assert("Бета" in text and "Гамма" in text and "Дельта" in text, "playoff places 2–4 are on the row")
-	_assert("Плей-офф" in text and "Регулярный сезон" in text, "one row names both parts of the season")
+	var season_labels := _labels_starting(screen.get_node("%Content"), "Сезон ")
+	_assert(season_labels.size() >= 2 and season_labels[0] == "Сезон 3" and season_labels[1] == "Сезон 1", "newer season is first")
+	_assert("Бета" in text and "Гамма" in text and "Дельта" in text, "playoff places 2–4 stay in the season list")
+	_assert(_has_exact_label(screen.get_node("%Content"), "4"), "the playoff column header still marks fourth place")
+	_assert(not _has_place_prefix(screen.get_node("%Content")), "season rows do not repeat the place before the club")
+	_assert(text.find("Плей-офф") < text.find("Регулярный сезон"), "playoff and the regular season stay side by side")
 	_assert(not ("40" in text) and not ("+12" in text), "the regular season row has no points or goal difference")
 	screen.queue_free()
 	GameSession.is_active = was_active
+
+
+func _has_exact_label(node: Node, expected: String) -> bool:
+	if node is Label and str(node.text) == expected:
+		return true
+	for child in node.get_children():
+		if _has_exact_label(child, expected):
+			return true
+	return false
+
+
+func _has_place_prefix(node: Node) -> bool:
+	if node is HBoxContainer and node.get_child_count() == 3:
+		var first := node.get_child(0)
+		var last := node.get_child(2)
+		if first is Label and last is Button and str(first.text) in ["1", "2", "3", "4"]:
+			return true
+	for child in node.get_children():
+		if _has_place_prefix(child):
+			return true
+	return false
+
+
+func _labels_starting(node: Node, prefix: String) -> PackedStringArray:
+	var found := PackedStringArray()
+	if node is Label and str(node.text).begins_with(prefix):
+		found.append(node.text)
+	for child in node.get_children():
+		found.append_array(_labels_starting(child, prefix))
+	return found
 
 
 func _gather_text(node: Node) -> String:

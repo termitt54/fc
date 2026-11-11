@@ -170,6 +170,7 @@ static func read_legacy(slot: String, season: int, active_ids: Dictionary) -> Di
 	var records: Array = []
 	for identity in identities:
 		var pid: int = int(identity["player_id"])
-		if not active_ids.has(pid):
-			records.append({"identity": identity, "player": {}, "seasons": seasons.get(pid, [])})
+		var record := {"identity": identity, "player": {}, "seasons": seasons.get(pid, [])}
+		if not active_ids.has(pid) and HISTORY.has_archived_playing_history(record):
+			records.append(record)
 	return DbResult.ok(records)

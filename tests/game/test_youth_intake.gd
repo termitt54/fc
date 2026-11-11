@@ -29,7 +29,111 @@ func _run() -> void:
 	_test_country_persistence_and_legacy_migration()
 	_test_pa_config_save_load()
 	_test_saved_birth_table_drives_intake()
+	_test_calibrated_generations()
+	_test_position_cohorts()
 	_finish()
+
+
+func _test_position_cohorts() -> void:
+	var config := YouthGenerationConfigScript
+	var defaults := config.default_birth_weights()
+	_assert(config.migrate_birth_rows(config.LEGACY_V4_BIRTH_WEIGHTS, 4) == defaults, "v5 upgrades the old default table")
+	_assert(config.migrate_birth_rows(config.LEGACY_V5_BIRTH_WEIGHTS, 5) == defaults, "v6 upgrades the old default table")
+	var custom := config.LEGACY_V4_BIRTH_WEIGHTS.duplicate(true)
+	custom[98][0] += 1
+	custom[98][1] -= 1
+	_assert(config.migrate_birth_rows(custom, 4) == custom, "v5 preserves manually customized v4 tables")
+	var clubs: Array = []
+	for i in 4:
+		clubs.append({"id": i + 1, "country_id": 1, "youth_academy": 10})
+	var covered := true
+	for seed_value in 50:
+		var rng := RandomNumberGenerator.new()
+		rng.seed = seed_value + 91100
+		var plan := YouthIntakeScript.plan_intake(clubs, {1: {"youth_talent": 98}}, rng, {"mode": YouthIntakeScript.MODE_FIRST_TEAM})
+		var strong_positions := {}
+		for player in plan:
+			if int(player.potential_ability) >= 80:
+				strong_positions[player.position] = true
+		covered = covered and plan.size() == 80 and strong_positions.size() == 4
+	_assert(covered, "Elite countries have a strong core in every position across 50 opening worlds")
+	for slots in [8, 31]:
+		var rng := RandomNumberGenerator.new()
+		rng.seed = 7171
+		var plan := YouthIntakeScript.plan_intake(clubs, {1: {"youth_talent": 85}}, rng, {"mode": YouthIntakeScript.MODE_FIRST_TEAM, "slots_per_club": slots})
+		_assert(plan.size() == slots * 4, "Position cohorts respect custom squad sizes")
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 129000
+	var rare_count := 0
+	var empty_cohorts := 0
+	for i in 1000:
+		var cohort: Array = config.roll_birth_cohort(98, 100, rng)
+		var rare := cohort.filter(func(pa): return int(pa) >= 90).size()
+		rare_count += rare
+		empty_cohorts += int(rare == 0)
+	_assert(rare_count > 750 and rare_count < 1250, "Stratification preserves the one-percent rare-player tail")
+	_assert(empty_cohorts > 200, "A rare superstar is not guaranteed in each generation")
+
+
+func _test_calibrated_generations() -> void:
+	var defaults := YouthGenerationConfigScript.default_birth_weights()
+	var valid := true
+	for talent in 101:
+		var sum := 0
+		for weight in defaults[talent]:
+			sum += int(weight)
+			valid = valid and int(weight) >= 0
+		valid = valid and sum == YouthGenerationConfigScript.BIRTH_WEIGHT_TOTAL
+		if talent > 0:
+			for band in range(1, YouthGenerationConfigScript.BIRTH_BANDS.size()):
+				var previous := 0
+				var current := 0
+				for i in range(band, YouthGenerationConfigScript.BIRTH_BANDS.size()):
+					previous += int(defaults[talent - 1][i])
+					current += int(defaults[talent][i])
+				valid = valid and current >= previous
+	_assert(valid, "Calibration: every tail probability increases with talent; all rows sum to 100%")
+	var legacy := YouthGenerationConfigScript.LEGACY_V1_BIRTH_WEIGHTS.duplicate(true)
+	_assert(YouthGenerationConfigScript.migrate_birth_rows(legacy, 1) == defaults, "Calibration: old defaults migrate exactly")
+	legacy[80] = [1000, 0, 0, 0, 0, 0]
+	legacy[85] = [40, 125, 400, 370, 60, 5]
+	var migrated := YouthGenerationConfigScript.migrate_birth_rows(legacy, 1)
+	_assert(migrated[80] == defaults[80], "Calibration v4: unsafe old custom tables replaced on requested full recalibration")
+	_assert(YouthGenerationConfigScript._validated_birth_rows(migrated).size() == 101, "Calibration: custom migrations remain normalized")
+	_assert(YouthGenerationConfigScript.migrate_birth_rows(legacy, 2) == defaults, "Calibration v4: old v2 amplification cannot reappear")
+	var custom_v3 := defaults.duplicate(true)
+	custom_v3[80].fill(0)
+	custom_v3[80][1] = YouthGenerationConfigScript.BIRTH_WEIGHT_TOTAL
+	_assert(YouthGenerationConfigScript.migrate_birth_rows(custom_v3, YouthGenerationConfigScript.BIRTH_CONFIG_VERSION) == custom_v3, "Calibration v4: new custom settings remain exact")
+	var file := FileAccess.open(YouthGenerationConfigScript.birth_config_path, FileAccess.WRITE)
+	file.store_string(JSON.stringify({"version": 1, "rows": legacy}))
+	file.close()
+	YouthGenerationConfigScript.unload_birth()
+	_assert(YouthGenerationConfigScript.editor_birth_weights() == migrated, "Calibration: old disk config is adapted on load")
+	_assert(YouthGenerationConfigScript.apply_birth_weights(migrated).ok, "Calibration: migrated table saves")
+	YouthGenerationConfigScript.unload_birth()
+	_assert(YouthGenerationConfigScript.editor_birth_weights() == migrated, "Calibration: migrated table reloads unchanged")
+	YouthGenerationConfigScript.reset_birth_to_defaults(false)
+	var means := {}
+	var best := {}
+	for talent in [70, 78, 85]:
+		var mean := 0.0
+		var top := 0.0
+		for seed in 160:
+			var rows := YouthIntakeScript.plan_intake(_two_country_clubs(3, 0), {1: {"youth_talent": talent}}, _rng(87000 + seed), {"mode": YouthIntakeScript.MODE_FIRST_TEAM})
+			var pas: Array = []
+			var cas: Array = []
+			for row in rows:
+				pas.append(int(row.potential_ability))
+				cas.append(int(row.current_ability))
+			mean += _mean_of(pas) / 160.0
+			top += _best_mean(cas, 8) / 160.0
+		means[talent] = mean
+		best[talent] = top
+	_assert(float(means[85]) > float(means[70]) + 8.0, "Calibration: talent 85 vs 70 separates generation quality across 160 worlds")
+	_assert(float(best[85]) > float(best[70]) + 5.0, "Calibration: separation reaches strongest adult players, not only pool averages")
+	_assert(float(best[85]) > float(best[78]) + 1.0, "Calibration: talent 85 and 78 remain distinct at the top")
+	print("CALIBRATED GENERATIONS meanPA=", means, " top8CA=", best)
 
 
 func _test_slot_counts_and_caps() -> void:
@@ -114,12 +218,12 @@ func _test_country_owns_its_generation() -> void:
 		sum_10 += int(weight)
 	for weight in weights_80:
 		sum_80 += int(weight)
-	_assert(sum_10 == 1000, "Test 4: talent 10 chances sum to 100 percent")
-	_assert(sum_80 == 1000, "Test 4: talent 80 chances sum to 100 percent")
-	_assert(int(weights_10[5]) == 0, "Test 4: talent 10 does not birth 90-100")
+	_assert(sum_10 == YouthGenerationConfigScript.BIRTH_WEIGHT_TOTAL, "Test 4: talent 10 chances sum to 100 percent")
+	_assert(sum_80 == YouthGenerationConfigScript.BIRTH_WEIGHT_TOTAL, "Test 4: talent 80 chances sum to 100 percent")
+	_assert(YouthGenerationConfigScript.potential_probability(10, 90) < 0.000001, "Test 4: talent 10 does not birth 90-100")
 	var weights_100: Array = YouthGenerationConfigScript.birth_weights(100)
-	_assert(int(weights_100[4]) == 40, "Test 4: talent 100 births 80-89 in 4 percent")
-	_assert(int(weights_100[5]) == 5, "Test 4: talent 100 births 90-100 in 0.5 percent")
+	_assert(YouthGenerationConfigScript.potential_probability(100, 80) >= 0.85, "Test 4: elite talent has a deep strong-player pool")
+	_assert(is_equal_approx(YouthGenerationConfigScript.potential_probability(100, 90), 0.01), "Test 4: elite talent produces 90+ in 1 percent")
 	var clubs: Array = [_club(1, 1, {"name": "Strong"})]
 	for i in 40:
 		clubs.append(_club(100 + i, 2, {"name": "W%d" % i}))
@@ -132,6 +236,7 @@ func _test_country_owns_its_generation() -> void:
 	var weak_sum := 0
 	var weak_n := 0
 	var weak_max := 0
+	var weak_elite := 0
 	for i in 30:
 		var rng := _rng(4000 + i)
 		var assignments: Array = YouthIntakeScript.plan_intake(
@@ -146,9 +251,11 @@ func _test_country_owns_its_generation() -> void:
 				weak_sum += pa
 				weak_n += 1
 				weak_max = maxi(weak_max, pa)
+				if pa >= 90:
+					weak_elite += 1
 	var strong_mean := float(strong_sum) / float(strong_n)
 	var weak_mean := float(weak_sum) / float(weak_n)
-	_assert(weak_max <= 89, "Test 4: talent 20 does not birth 90+ (max %d)" % weak_max)
+	_assert(YouthGenerationConfigScript.potential_probability(20, 90) > 0.0 and float(weak_elite) / weak_n < 0.003, "Test 4: weak country can birth a rare elite, without a large elite pool (%d)" % weak_elite)
 	_assert(strong_n == 180, "Test 4: talent 80 filled only its own slots (%d)" % strong_n)
 	_assert(
 		strong_mean >= weak_mean + 8.0,
@@ -539,7 +646,8 @@ func _test_pa_config_save_load() -> void:
 
 func _test_saved_birth_table_drives_intake() -> void:
 	var rows: Array = YouthGenerationConfigScript.default_birth_weights()
-	rows[80] = [1000, 0, 0, 0, 0, 0]
+	rows[80].fill(0)
+	rows[80][1] = YouthGenerationConfigScript.BIRTH_WEIGHT_TOTAL
 	var saved: Dictionary = YouthGenerationConfigScript.apply_birth_weights(rows)
 	_assert(bool(saved.get("ok", false)), "Test 13: birth table saves")
 	YouthGenerationConfigScript.unload_birth()
@@ -555,13 +663,13 @@ func _test_saved_birth_table_drives_intake() -> void:
 		if potential_ability < 40 or potential_ability > 49:
 			all_in_band = false
 	_assert(all_in_band, "Test 13: saved talent row is what gets born")
-	rows[80] = [100, 0, 0, 0, 0, 0]
+	rows[80][1] = 100
 	var rejected: Dictionary = YouthGenerationConfigScript.apply_birth_weights(rows)
 	_assert(not bool(rejected.get("ok", true)), "Test 13: a row that is not 100% is rejected")
 	var tab := (load("res://scenes/settings/tabs/global_pa_tab.tscn") as PackedScene).instantiate()
 	add_child(tab)
 	var row_count := tab.get_node("%Rows").get_child_count()
-	_assert(row_count == 102, "Test 13: header and every talent 0–100 are on screen (%d)" % row_count)
+	_assert(row_count == 101, "Test 13: every talent 0–100 is present with a separate sticky header (%d)" % row_count)
 	tab.queue_free()
 	YouthGenerationConfigScript.reset_birth_to_defaults(false)
 

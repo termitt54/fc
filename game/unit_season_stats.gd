@@ -2,8 +2,9 @@ class_name UnitSeasonStats
 extends RefCounted
 
 const MatchTypesScript := preload("res://game/match_types.gd")
-## Player leaderboards for one tournament unit, current season only.
-## Figures are taken from matches of this unit, not from a player's other competitions.
+## Player leaderboards for one tournament unit.
+## Figures come from matches of this unit, not from a player's other competitions.
+## A season bag is the current table. combine() adds those bags across seasons.
 
 
 const KEY := "season_player_stats"
@@ -54,6 +55,10 @@ static func record_report(unit: Dictionary, club_id: int, report: Dictionary) ->
 		if not position.is_empty():
 			row["position"] = position
 		row["matches"] = int(row.get("matches", 0)) + 1
+		# Preserve the missing marker in legacy bags until their first season ends;
+		# adding a partial minute total would conceal earlier appearances.
+		if row.has("minutes") or int(row["matches"]) == 1:
+			row["minutes"] = int(row.get("minutes", 0)) + minutes
 		row["goals"] = int(row.get("goals", 0)) + int(entry.get("goals", 0))
 		row["assists"] = int(row.get("assists", 0)) + int(entry.get("assists", 0))
 		row["yellow"] = int(row.get("yellow", 0)) + int(entry.get("yellow", 0))
@@ -65,12 +70,35 @@ static func record_report(unit: Dictionary, club_id: int, report: Dictionary) ->
 
 
 static func leaders(unit: Dictionary, field: String, limit: int = LIMIT) -> Array:
-	var bag := ensure(unit)
+	return leaders_in(ensure(unit), field, limit)
+
+
+## Sum season bags. A player keeps one row; the club is whoever he played the most matches for.
+## Later bags win a tie, so the current season can replace an equal earlier club.
+static func combine(bags: Array) -> Dictionary:
+	var total: Dictionary = {}
+	for bag in bags:
+		if typeof(bag) != TYPE_DICTIONARY:
+			continue
+		for player_id in bag.keys():
+			var extra: Variant = bag[player_id]
+			if typeof(extra) != TYPE_DICTIONARY:
+				continue
+			_absorb(total, extra)
+	return total
+
+
+static func leaders_in(bag: Dictionary, field: String, limit: int = LIMIT) -> Array:
 	var rows: Array = []
 	for player_id in bag.keys():
-		var row: Dictionary = bag[player_id]
+		var source: Variant = bag[player_id]
+		if typeof(source) != TYPE_DICTIONARY:
+			continue
+		var row: Dictionary = (source as Dictionary).duplicate()
 		if _metric(row, field) <= 0.0:
 			continue
+		row["club_id"] = _primary_club(row)
+		row.erase("_clubs")
 		rows.append(row)
 	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		var left := _metric(a, field)
@@ -89,8 +117,12 @@ static func leaders(unit: Dictionary, field: String, limit: int = LIMIT) -> Arra
 
 
 static func has_leaders(unit: Dictionary) -> bool:
+	return has_leaders_in(ensure(unit))
+
+
+static func has_leaders_in(bag: Dictionary) -> bool:
 	for board in BOARDS:
-		if not leaders(unit, str(board["field"]), 1).is_empty():
+		if not leaders_in(bag, str(board["field"]), 1).is_empty():
 			return true
 	return false
 
@@ -99,6 +131,67 @@ static func format_metric(row: Dictionary, field: String) -> String:
 	if field == "rating":
 		return "%.2f" % _metric(row, field)
 	return str(int(_metric(row, field)))
+
+
+static func _absorb(total: Dictionary, extra: Dictionary) -> void:
+	var player_id := int(extra.get("player_id", 0))
+	if player_id < 1:
+		return
+	var existing: Variant = total.get(player_id, null)
+	var row: Dictionary = (existing as Dictionary).duplicate() if typeof(existing) == TYPE_DICTIONARY else {
+		"player_id": player_id,
+		"name": "",
+		"position": "",
+		"club_id": 0,
+		"matches": 0,
+		"goals": 0,
+		"assists": 0,
+		"yellow": 0,
+		"red": 0,
+		"clean_sheets": 0,
+		"rating_sum": 0.0,
+	}
+	var name := str(extra.get("name", "")).strip_edges()
+	if not name.is_empty():
+		row["name"] = name
+	var position := str(extra.get("position", "")).strip_edges()
+	if not position.is_empty():
+		row["position"] = position
+	for field in ["matches", "goals", "assists", "yellow", "red", "clean_sheets"]:
+		row[field] = int(row.get(field, 0)) + int(extra.get(field, 0))
+	row["rating_sum"] = float(row.get("rating_sum", 0.0)) + float(extra.get("rating_sum", 0.0))
+	var clubs: Dictionary = {}
+	var stored: Variant = row.get("_clubs", null)
+	if typeof(stored) == TYPE_DICTIONARY:
+		clubs = (stored as Dictionary).duplicate()
+	var club_id := int(extra.get("club_id", 0))
+	if club_id > 0:
+		row["club_id"] = club_id
+	var extra_clubs: Variant = extra.get("_clubs", null)
+	if typeof(extra_clubs) == TYPE_DICTIONARY and not (extra_clubs as Dictionary).is_empty():
+		for raw_id in (extra_clubs as Dictionary).keys():
+			var id := int(raw_id)
+			clubs[id] = int(clubs.get(id, 0)) + int((extra_clubs as Dictionary)[raw_id])
+	elif club_id > 0:
+		clubs[club_id] = int(clubs.get(club_id, 0)) + maxi(int(extra.get("matches", 0)), 1)
+	row["_clubs"] = clubs
+	total[player_id] = row
+
+
+static func _primary_club(row: Dictionary) -> int:
+	var clubs: Variant = row.get("_clubs", null)
+	if typeof(clubs) != TYPE_DICTIONARY or (clubs as Dictionary).is_empty():
+		return int(row.get("club_id", 0))
+	var latest := int(row.get("club_id", 0))
+	var best_id := latest
+	var best_matches := -1
+	for club_id in (clubs as Dictionary).keys():
+		var id := int(club_id)
+		var matches := int((clubs as Dictionary)[club_id])
+		if matches > best_matches or (matches == best_matches and id == latest):
+			best_matches = matches
+			best_id = id
+	return best_id
 
 
 static func _metric(row: Dictionary, field: String) -> float:

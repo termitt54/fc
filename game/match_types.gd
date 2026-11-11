@@ -18,14 +18,16 @@ const ET_PHASES := 4
 const ET_MINUTES := 20
 
 const SUBS_MAX := 5
+## Keepers have a different running workload; shared by in-match and daily load.
+const GOALKEEPER_WORKLOAD_FACTOR := 0.35
 ## Coaches keep at least one window in reserve for injuries.
 const SUBS_FATIGUE_PHASE_FROM := 6
 
 ## Chance funnel. chances -> created (shot) -> on target -> goal.
-const CHANCES_PER_PHASE := 1.02
-const CHANCE_CREATE_BASE := 0.72
-const SHOT_ON_TARGET_BASE := 0.63
-## Applied to shots on target, so roughly 0.19 of all shots end up in the net.
+const CHANCES_PER_PHASE := 2.26
+const CHANCE_CREATE_BASE := 0.78
+const SHOT_ON_TARGET_BASE := 0.43
+## Conditional on a shot reaching the target; player duels still modify this.
 const SHOT_CONVERSION_BASE := 0.30
 const SET_PIECE_SHARE := 0.22
 const PENALTY_PER_PHASE := 0.013
@@ -33,24 +35,29 @@ const PENALTY_CONVERSION_BASE := 0.76
 const SHOOTOUT_ROUNDS := 5
 const SHOOTOUT_MAX_ROUNDS := 24
 
-const HOME_ADVANTAGE := 0.075
-const HOME_REPUTATION_BONUS := 0.035
+const HOME_ADVANTAGE := 0.06
+const HOME_REPUTATION_BONUS := 0.0
 const NEUTRAL_VENUE_KEY := "neutral"
 
 ## How far the better side can be pushed by a bad day. Without this every
 ## mismatch ends the same way and the underdog never steals a game.
-const TEAM_FORM_SPREAD := 0.13
+const TEAM_FORM_SPREAD := 0.06
 const TEAM_FORM_MIN := 0.72
 const TEAM_FORM_MAX := 1.28
 ## How sharply a quality edge turns into chances. Lower means flatter football.
-const QUALITY_EXPONENT := 0.60
+const QUALITY_EXPONENT := 1.20
 const QUALITY_RATIO_MIN := 0.62
 const QUALITY_RATIO_MAX := 1.45
+## Smooth collective edge from the actual on-field ability, after fit and fatigue.
+## Reciprocal bounds prevent the favourite/underdog adjustment from running away.
+const SQUAD_GAP_LINEAR := 0.05
+const SQUAD_GAP_QUADRATIC := 0.0007
+const SQUAD_LOG_EDGE_MAX := 1.65
 
 ## Discipline base rates per phase, before unit strictness and coach discipline.
-const YELLOW_PER_PHASE := 0.118
+const YELLOW_PER_PHASE := 0.090
 const SECOND_YELLOW_SHARE := 0.085
-const RED_DIRECT_SHARE := 0.038
+const RED_DIRECT_SHARE := 0.018
 const MAN_DOWN_PENALTY := 0.16
 
 const INJURY_PER_PHASE := 0.019
@@ -74,13 +81,13 @@ const CONDITION_START := 100
 ## Legacy average cost; live match drain uses condition_after_stamina_* knobs.
 const CONDITION_MATCH_COST := 34.0
 ## Condition left after 50 minutes at intensity 1.0, starting from 100.
-const CONDITION_AFTER_STAMINA_1 := 57.0
-const CONDITION_AFTER_STAMINA_10 := 65.0
-const CONDITION_AFTER_STAMINA_20 := 73.0
+const CONDITION_AFTER_STAMINA_1 := 30.0
+const CONDITION_AFTER_STAMINA_10 := 60.0
+const CONDITION_AFTER_STAMINA_20 := 82.0
 ## On-pitch freshness left after 50 minutes at intensity 1.0 / full condition.
-const FRESH_AFTER_STAMINA_1 := 0.75
-const FRESH_AFTER_STAMINA_10 := 0.82
-const FRESH_AFTER_STAMINA_20 := 0.89
+const FRESH_AFTER_STAMINA_1 := 0.45
+const FRESH_AFTER_STAMINA_10 := 0.72
+const FRESH_AFTER_STAMINA_20 := 0.92
 ## Recovery closes a share of the gap to full fitness, so it never wipes the
 ## whole cost of a game: an every-round starter settles around 75-80.
 const CONDITION_RECOVERY_FLOOR := 3.0
@@ -121,24 +128,14 @@ const STAGE_PLAYOFF := "PLAYOFF"
 
 ## How much a slot feeds attack / possession / defence.
 const SLOT_ROLE := {
-	"GK": {"att": 0.02, "ctrl": 0.10, "def": 0.30},
-	"CB": {"att": 0.10, "ctrl": 0.34, "def": 1.00},
-	"FB": {"att": 0.34, "ctrl": 0.50, "def": 0.80},
-	"CM": {"att": 0.50, "ctrl": 1.00, "def": 0.56},
-	"WM": {"att": 0.66, "ctrl": 0.80, "def": 0.44},
-	"WF": {"att": 1.00, "ctrl": 0.54, "def": 0.20},
-	"ST": {"att": 1.10, "ctrl": 0.40, "def": 0.12},
+	"GK":{"att":0.02,"ctrl":0.10,"def":0.30},
+	"CB":{"att":0.28,"ctrl":0.45,"def":1.0},
+	"CM":{"att":0.75,"ctrl":1.0,"def":0.55},
+	"ST":{"att":1.0,"ctrl":0.50,"def":0.20},
 }
-
-## Per-style match shape. tempo scales own chances, concede scales the opponent's.
 const STYLE_PROFILE := {
-	"tiki_taka": {"tempo": 0.88, "ctrl": 1.22, "def": 1.00, "concede": 0.94, "intensity": 1.00, "quality": 1.06},
-	"control": {"tempo": 0.96, "ctrl": 1.12, "def": 1.04, "concede": 0.96, "intensity": 0.95, "quality": 1.02},
-	"vertical": {"tempo": 1.16, "ctrl": 0.98, "def": 0.94, "concede": 1.08, "intensity": 1.05, "quality": 1.00},
-	"kick_rush": {"tempo": 1.20, "ctrl": 0.84, "def": 0.90, "concede": 1.14, "intensity": 1.02, "quality": 0.92},
-	"pressing": {"tempo": 1.12, "ctrl": 1.06, "def": 1.06, "concede": 1.06, "intensity": 1.24, "quality": 1.00},
-	"park_bus": {"tempo": 0.68, "ctrl": 0.72, "def": 1.26, "concede": 0.80, "intensity": 1.00, "quality": 0.94},
-	"counter": {"tempo": 0.86, "ctrl": 0.80, "def": 1.14, "concede": 0.88, "intensity": 1.06, "quality": 1.14},
+	"attacking":{"tempo":1.0,"ctrl":1.0,"def":1.0,"concede":1.0,"intensity":1.0,"quality":1.0},
+	"defensive":{"tempo":0.97,"ctrl":1.0,"def":1.0,"concede":1.0,"intensity":0.97,"quality":1.0},
 }
 
 const STYLE_FALLBACK := {
@@ -152,14 +149,7 @@ const SLOT_FIT_NEIGHBOUR := 0.74
 const SLOT_FIT_ALIEN := 0.52
 const SLOT_FIT_GK_MISMATCH := 0.30
 
-const NEIGHBOUR_SLOTS := {
-	"CB": ["FB", "CM"],
-	"FB": ["CB", "WM"],
-	"CM": ["WM", "CB", "WF"],
-	"WM": ["CM", "FB", "WF"],
-	"WF": ["WM", "ST", "CM"],
-	"ST": ["WF", "CM"],
-}
+const NEIGHBOUR_SLOTS := {"CB":["CM"],"CM":["CB","ST"],"ST":["CM"]}
 
 
 static func style_profile(style: String) -> Dictionary:

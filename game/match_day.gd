@@ -1,5 +1,8 @@
 class_name MatchDay
 extends RefCounted
+
+const NationalRatingScript = preload("res://game/national_rating.gd")
+const ClubRatingScript = preload("res://game/club_rating.gd")
 ## Bridge between the session calendar and the match engine.
 ## Builds the two team specs, runs one game and writes every consequence back:
 ## statistics, condition, morale, cards, bans and injuries.
@@ -44,7 +47,7 @@ static func simulate(
 			"home": _team_spec(session, unit, home_id),
 			"away": _team_spec(session, unit, away_id),
 			"allow_draw": not playoff,
-			"neutral": bool(match_row.get("neutral", false)),
+			"neutral": NationalTeams.is_unit(unit) or bool(match_row.get("neutral", false)),
 			"importance": PLAYOFF_IMPORTANCE if playoff else 1.0,
 			"discipline": discipline,
 		},
@@ -57,8 +60,9 @@ static func simulate(
 
 	# Bans are served by taking part in the matchday, so they tick down before
 	# the cards from this very game are handed out.
-	_serve_suspensions(session, home_id)
-	_serve_suspensions(session, away_id)
+	if not NationalTeams.is_team(home_id):
+		_serve_suspensions(session, home_id)
+		_serve_suspensions(session, away_id)
 
 	_apply_side(session, home_id, result.get("home_team", {}), result, outcome, discipline)
 	_apply_side(session, away_id, result.get("away_team", {}), result, -outcome, discipline)
@@ -80,12 +84,19 @@ static func simulate(
 		match_row.erase("shootout")
 	else:
 		match_row["shootout"] = shootout
+	NationalRatingScript.record(session, unit, match_row)
+	ClubRatingScript.record(session, unit, match_row)
 	match_row["report"] = _compact_report(result)
 	return result
 
 
 ## One calendar round of rest for every player in the save.
 static func advance_rounds(session: Node, tick: Dictionary) -> void:
+	var native: Variant = NativeSimulation.core()
+	if native != null:
+		for pool in _recovery_pools(session):
+			native.recover_players(pool,tick.get("players",{}))
+		return
 	var players: Dictionary = tick.get("players", {})
 	for map in [session.players_by_club, session.youth_players_by_club, session.reserve_players_by_club]:
 		for club_id in map.keys():
@@ -96,11 +107,22 @@ static func advance_rounds(session: Node, tick: Dictionary) -> void:
 					)
 	for player in session.free_agents:
 		if typeof(player) == TYPE_DICTIONARY:
-			PlayerConditionScript.advance_round(player, false)
+			PlayerConditionScript.advance_round(player, players.has(int(player.get("id", 0))))
 
 
 ## Same recovery order, with checkpoints between small batches of players.
 static func advance_rounds_async(session: Node, tick: Dictionary, work: RefCounted = null) -> void:
+	var native: Variant = NativeSimulation.core()
+	if native != null:
+		var processed_native := 0
+		for pool in _recovery_pools(session):
+			for offset in range(0,pool.size(),128):
+				var batch: Array = pool.slice(offset,mini(offset+128,pool.size()))
+				native.recover_players(batch,tick.get("players",{}))
+				processed_native += batch.size()
+				if work != null:
+					await work.checkpoint("Восстановление игроков",processed_native)
+		return
 	var players: Dictionary = tick.get("players", {})
 	var processed := 0
 	for map in [session.players_by_club, session.youth_players_by_club, session.reserve_players_by_club]:
@@ -118,7 +140,7 @@ static func advance_rounds_async(session: Node, tick: Dictionary, work: RefCount
 		if work != null and processed % 64 == 0:
 			await work.checkpoint("Восстановление игроков", processed)
 		if typeof(player) == TYPE_DICTIONARY:
-			PlayerConditionScript.advance_round(player, false)
+			PlayerConditionScript.advance_round(player, players.has(int(player.get("id", 0))))
 
 
 ## Yellow cards are wiped for the clubs of one unit.
@@ -137,9 +159,9 @@ static func _team_spec(session: Node, unit: Dictionary, club_id: int) -> Diction
 	var club: Dictionary = clubs.get(club_id, {})
 	return {
 		"club_id": club_id,
-		"squad": session.get_club_players(club_id),
+		"squad": NationalTeams.match_squad(session, club_id) if NationalTeams.is_team(club_id) else session.get_club_players(club_id),
 		"youth": session.get_club_reserve_players(club_id) + session.get_club_youth_players(club_id),
-		"coach": session.get_club_coach(club_id),
+		"coach": session.get_club_coach(club_id).merged({"national_selection": true}) if NationalTeams.is_team(club_id) else session.get_club_coach(club_id),
 		"reputation": int(club.get("reputation", 500)),
 	}
 
@@ -153,6 +175,9 @@ static func _apply_side(
 	discipline: Dictionary
 ) -> void:
 	if report.is_empty():
+		return
+	if NationalTeams.is_team(club_id):
+		NationalTeams.apply_report(session, club_id, report, result, outcome, discipline)
 		return
 	var season := int(session.season_number)
 	var minutes_total := maxi(int(result.get("minutes_played", MatchTypesScript.REGULAR_MINUTES)), 1)
@@ -292,7 +317,11 @@ static func _compact_report(result: Dictionary) -> Dictionary:
 		"home": _compact_team(result.get("home_team", {})),
 		"away": _compact_team(result.get("away_team", {})),
 		"minutes": int(result.get("minutes_played", 0)),
+		"engine": str(result.get("engine", "legacy")),
 	}
+	if result.has("settings_fingerprint"):
+		report["settings_version"] = int(result.get("settings_version", 0))
+		report["settings_fingerprint"] = str(result["settings_fingerprint"])
 	if bool(result.get("extra_time", false)):
 		report["extra_time"] = true
 	var shootout: Dictionary = result.get("shootout", {})
@@ -317,15 +346,26 @@ static func _compact_team(report: Dictionary) -> Dictionary:
 		return {}
 	return {
 		"club_id": int(report.get("club_id", 0)),
+		"starting_ability": float(report.get("starting_ability", 0.0)),
+		"starting_condition": float(report.get("starting_condition", 0.0)),
+		"starting_keeper": (report.get("starting_keeper", {}) as Dictionary).duplicate(),
 		"style": str(report.get("style", "")),
 		"formation": str(report.get("formation", "")),
 		"initial_style": str(report.get("initial_style", report.get("style", ""))),
 		"plan_source": str(report.get("plan_source", "primary")),
 		"plan_reason": str(report.get("plan_reason", "preferred_plan")),
 		"decisions": report.get("decisions", []).duplicate(true),
+		"actions": (report.get("actions",{}) as Dictionary).duplicate(),
 		"shots": int(report.get("shots", 0)),
 		"on_target": int(report.get("on_target", 0)),
 		"possession": float(report.get("possession", 0.5)),
 		"yellow": int(report.get("yellow", 0)),
 		"red": int(report.get("red", 0)),
 	}
+
+static func _recovery_pools(session: Node) -> Array:
+	var pools: Array = []
+	for map in [session.players_by_club,session.youth_players_by_club,session.reserve_players_by_club]:
+		pools.append_array(map.values())
+	pools.append(session.free_agents)
+	return pools

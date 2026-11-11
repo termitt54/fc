@@ -1,5 +1,6 @@
 extends Node
 const Coaching := preload("res://game/match_coaching.gd")
+const HistoryStoreScript := preload("res://game/history_store.gd")
 var report := {"errors": [], "frozen": [], "dynamic": []}
 var source: Dictionary
 var unit_id := 0
@@ -14,7 +15,8 @@ func _ready() -> void:
 
 func _run() -> void:
 	started = Time.get_ticks_msec()
-	var loaded: Dictionary = SaveStore.new().load_slot("autosave")
+	var save_store := SaveStore.new()
+	var loaded: Dictionary = save_store.load_slot("autosave")
 	if not _ok(loaded):
 		return
 	source = loaded["data"]
@@ -30,6 +32,25 @@ func _run() -> void:
 	report["snapshot_outcome"] = _outcome()
 	print("USER TITLE SOURCE ", JSON.stringify(report["source"]))
 	if OS.get_cmdline_user_args().has("--inspect-only"):
+		if OS.get_cmdline_user_args().has("--export-payload"):
+			var archived: Array = []
+			var head := int(source.get("history_head", 0))
+			if save_store._open() and save_store._db.query_with_bindings(HistoryStoreScript.ANCESTORS + "SELECT body FROM save_history_players WHERE history_id IN (SELECT id FROM ancestry);", [head, head]):
+				for row in save_store._db.query_result:
+					archived.append(bytes_to_var(row["body"]))
+			else:
+				report["errors"].append("Cannot export career archive")
+			save_store._close()
+			var archive_file := FileAccess.open("res://tests/performance/results/user-title-archive.json", FileAccess.WRITE)
+			if archive_file != null:
+				archive_file.store_string(JSON.stringify(archived))
+				archive_file.close()
+			var payload_file := FileAccess.open("res://tests/performance/results/user-title-payload.json", FileAccess.WRITE)
+			if payload_file == null:
+				report["errors"].append("Cannot export diagnostic payload")
+			else:
+				payload_file.store_string(JSON.stringify(source))
+				payload_file.close()
 		_finish()
 		return
 	# Complete the saved partial season, then use real interseason + market

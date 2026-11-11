@@ -1,5 +1,7 @@
 class_name PlayoffManager
 extends RefCounted
+
+const NationalCompetitionRulesScript = preload("res://game/national_competition_rules.gd")
 ## Seeds / advances DIVISIONS playoff brackets.
 
 
@@ -15,14 +17,7 @@ static func estimate_days(playoff: Dictionary) -> int:
 
 
 static func regular_complete(unit: Dictionary) -> bool:
-	var has_regular := false
-	for match_row in unit.get("matches", []):
-		if str(match_row.get("stage", "REGULAR")) != "REGULAR":
-			continue
-		has_regular = true
-		if not bool(match_row.get("played", false)):
-			return false
-	return true if has_regular else (unit.get("matches", []) as Array).is_empty()
+	return NationalCompetitionRulesScript.regular_complete(unit)
 
 
 static func maybe_start(unit: Dictionary, season_day: int, next_match_id: int) -> Dictionary:
@@ -122,19 +117,11 @@ static func after_day_simulated(unit: Dictionary, season_day: int, next_match_id
 
 
 static func is_unit_season_complete(unit: Dictionary) -> bool:
-	var playoff: Dictionary = unit.get("playoff", {})
-	if bool(playoff.get("enabled", false)):
-		return bool(playoff.get("finished", false))
-	return regular_complete(unit)
+	return NationalCompetitionRulesScript.is_unit_season_complete(unit)
 
 
 static func _rounds_for_teams(teams: int) -> int:
-	var n := maxi(teams, 2)
-	var rounds := 0
-	while n > 1:
-		n = int(ceil(float(n) / 2.0))
-		rounds += 1
-	return rounds
+	return NationalCompetitionRulesScript._rounds_for_teams(teams)
 
 
 static func _max_days_per_series(playoff: Dictionary) -> int:
@@ -146,6 +133,15 @@ static func _max_days_per_series(playoff: Dictionary) -> int:
 			return 2
 		_:
 			return 1
+
+
+static func qualifier_ids(unit: Dictionary) -> Array:
+	var playoff: Dictionary = unit.get("playoff", {})
+	if not bool(playoff.get("enabled", false)):
+		return []
+	if maxi(int(playoff.get("teams", 0)), 0) < 2:
+		return []
+	return _select_qualifiers(unit)
 
 
 static func _select_qualifiers(unit: Dictionary) -> Array:
@@ -161,6 +157,21 @@ static func _select_qualifiers(unit: Dictionary) -> Array:
 		var divisions: Array = unit.get("divisions", [])
 		var per := CompetitionUnitRepository.per_division_quota(teams, maxi(divisions.size(), 1))
 		var ids: Array = []
+		if NationalTeams.is_unit(unit):
+			# Rank by group place first, then compare equal places for extra berths.
+			var by_place: Dictionary = {}
+			for group in divisions:
+				var ranked := _sorted_division_rows(unit, int(group.get("index", 0)), ranking)
+				for place in ranked.size():
+					if not by_place.has(place):
+						by_place[place] = []
+					by_place[place].append(ranked[place])
+			for place in by_place:
+				by_place[place].sort_custom(func(a, b): return _compare_standings(a, b, ranking) < 0)
+				for row in by_place[place]:
+					if ids.size() < teams:
+						ids.append(int(row.get("club_id", 0)))
+			return ids
 		for division in divisions:
 			var div_index: int = int(division.get("index", 0))
 			var rows := _sorted_division_rows(unit, div_index, ranking)
@@ -288,19 +299,32 @@ static func _cross_seed_pairs(unit: Dictionary, fallback_teams: Array) -> Array:
 	if divisions.size() != 2:
 		return _seeded_bracket_pairs(fallback_teams)
 	var ranking: Array = RankingCriteria.parse_stored(unit.get("rules", {}).get("ranking_order", null))
-	var take := int(ceil(float(fallback_teams.size()) / 2.0))
-	# Only playoff qualifiers from each division — not the full table.
-	var a := _sorted_division_rows(unit, 0, ranking).slice(0, take)
-	var b := _sorted_division_rows(unit, 1, ranking).slice(0, take)
-	if a.is_empty() or b.is_empty():
+	var eligible: Dictionary = {}
+	for id in fallback_teams:
+		eligible[int(id)] = true
+	# Seed only actual qualifiers; overall qualification can leave unequal groups.
+	var a := _sorted_division_rows(unit, int(divisions[0].get("index", 0)), ranking).filter(func(row): return eligible.has(int(row.get("club_id", 0))))
+	var b := _sorted_division_rows(unit, int(divisions[1].get("index", 1)), ranking).filter(func(row): return eligible.has(int(row.get("club_id", 0))))
+	var count := a.size()
+	if count == 0 or b.size() != count or count * 2 != fallback_teams.size() or (count & (count - 1)) != 0:
 		return _seeded_bracket_pairs(fallback_teams)
+	if count == 1:
+		return [{"home_id": int(a[0]["club_id"]), "away_id": int(b[0]["club_id"])}]
 	var pairs: Array = []
-	var count := mini(a.size(), b.size())
-	for i in count:
-		# 1A vs worst qualifier B, 2A vs next-worst B…
-		var home := int(a[i].get("club_id", 0))
-		var away := int(b[count - 1 - i].get("club_id", 0))
-		pairs.append({"home_id": home, "away_id": away})
+	var half := int(count / 2)
+	var order: Array = [0]
+	# Bit-reversed rank order: eight qualifiers per group -> 1,3,2,4 on each wing.
+	# Adjacent winners advance together, so ranks 1 and 2 cannot meet in a quarterfinal.
+	while order.size() < half:
+		var next: Array = []
+		for rank in order:
+			next.append(int(rank))
+			next.append(int(rank) + order.size())
+		order = next
+	for home_group in [a, b]:
+		var away_group: Array = b if home_group == a else a
+		for rank in order:
+			pairs.append({"home_id": int(home_group[int(rank)]["club_id"]), "away_id": int(away_group[count - 1 - int(rank)]["club_id"])})
 	return pairs
 
 
@@ -359,6 +383,17 @@ static func _series_has_unplayed(playoff: Dictionary, series_id: int) -> bool:
 
 static func _sync_series_from_matches(unit: Dictionary) -> void:
 	var playoff: Dictionary = unit.get("playoff", {})
+	# Serialized arrays need not preserve the alias between calendar and bracket.
+	# Always use the actual calendar results as the authoritative match objects.
+	var calendar: Dictionary = {}
+	for row in unit.get("matches", []):
+		if str(row.get("stage", "")) == "PLAYOFF":
+			calendar[int(row.get("id", 0))] = row
+	var bracket_matches: Array = playoff.get("matches", [])
+	for i in bracket_matches.size():
+		var id := int(bracket_matches[i].get("id", 0))
+		if calendar.has(id):
+			bracket_matches[i] = calendar[id]
 	for series in playoff.get("series", []):
 		if bool(series.get("complete", false)):
 			continue
@@ -392,31 +427,7 @@ static func _sync_series_from_matches(unit: Dictionary) -> void:
 
 ## Winner of a finished playoff game: open score, then shootout / stored winner.
 static func match_winner_club_id(match_row: Dictionary) -> int:
-	if not bool(match_row.get("played", false)):
-		return 0
-	var home_id: int = int(match_row.get("home_id", 0))
-	var away_id: int = int(match_row.get("away_id", 0))
-	var stored: int = int(match_row.get("winner_id", 0))
-	if stored == home_id or stored == away_id:
-		return stored
-	var hg: int = int(match_row.get("home_goals", 0))
-	var ag: int = int(match_row.get("away_goals", 0))
-	if hg > ag:
-		return home_id
-	if ag > hg:
-		return away_id
-	var shootout: Dictionary = match_row.get("shootout", {})
-	if shootout.is_empty():
-		var report: Dictionary = match_row.get("report", {})
-		if typeof(report) == TYPE_DICTIONARY:
-			shootout = report.get("shootout", {})
-	if typeof(shootout) != TYPE_DICTIONARY or shootout.is_empty():
-		return 0
-	var home_pens := int(shootout.get("home", 0))
-	var away_pens := int(shootout.get("away", 0))
-	if home_pens == away_pens:
-		return 0
-	return home_id if home_pens > away_pens else away_id
+	return NationalCompetitionRulesScript.match_winner_club_id(match_row)
 
 
 static func _is_series_decided(series: Dictionary, playoff: Dictionary) -> bool:
@@ -656,7 +667,7 @@ static func record_season_result(unit: Dictionary, season_number: int) -> void:
 	if season_number < 1:
 		return
 	var playoff_rows := _playoff_places(unit)
-	var regular_rows := _regular_places(unit, 3)
+	var regular_rows: Array = [] if NationalTeams.is_unit(unit) else _regular_places(unit, 3)
 	var champion_id := 0
 	var champion_name := ""
 	if not playoff_rows.is_empty():

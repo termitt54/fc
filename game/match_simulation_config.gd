@@ -7,421 +7,84 @@ extends RefCounted
 const MatchTypesScript := preload("res://game/match_types.gd")
 
 const DEFAULT_CONFIG_PATH := "user://config/match_simulation.json"
-const CONFIG_VERSION := 3
+const CONFIG_VERSION := 8
 
 const GROUP_SCORING := "scoring"
-const GROUP_BALANCE := "balance"
-const GROUP_DISCIPLINE := "discipline"
+const GROUP_BALANCE := "players"
+const GROUP_DISCIPLINE := GROUP_SCORING
+const GROUP_COACHING := "coaching"
 const GROUP_FITNESS := "fitness"
-const GROUP_RECOVERY := "recovery"
-const GROUP_LINEUP := "lineup"
+const GROUP_RECOVERY := GROUP_FITNESS
+const GROUP_LINEUP := "rotation"
 
 const GROUPS := [
-	{
-		"id": GROUP_SCORING,
-		"title": "Голы и удары",
-		"hint": "Это частота, когда соперники в эпизоде равны. Дальше удар решает бьющий против защитника и вратаря.",
-	},
-	{
-		"id": GROUP_BALANCE,
-		"title": "Баланс сил",
-		"hint": "Разницу в составе и план тренера превращает в удары. Карточка ослабляет команду до конца матча.",
-	},
-	{
-		"id": GROUP_DISCIPLINE,
-		"title": "Карточки и травмы",
-		"hint": "Базовые частоты до строгости судьи юнита и дисциплины тренера.",
-	},
-	{
-		"id": GROUP_FITNESS,
-		"title": "Усталость в матче",
-		"hint": "Три точки по Выносливости (1 / 10 / 20). Между ними считается линейно. Ниже значение — сильнее выдыхается.",
-	},
-	{
-		"id": GROUP_RECOVERY,
-		"title": "Восстановление между турами",
-		"hint": "Три точки по Восстановлению (1 / 10 / 20). Игрок закрывает долю недобора до 100, а не прыгает к полной шкале.",
-	},
-	{
-		"id": GROUP_LINEUP,
-		"title": "Заявка на матч",
-		"hint": "Усталость должна сажать игрока, а не только снижать его силу. Ниже ползунки — тренер охотнее ставит свежего запасного.",
-	},
+	{"id": GROUP_SCORING, "title": "Симуляция матчей", "short": "Матчи", "hint": "Темп, голы, карточки и травмы. Базовые вероятности затем меняются из-за игроков и ситуации на поле. Больше голов не означает больше преимущества фаворита."},
+	{"id": GROUP_BALANCE, "title": "Влияние игроков на матч", "short": "Игроки", "hint": "Каждый футболист действует своими навыками: передаёт, принимает мяч, обыгрывает, отбирает, бьёт или отражает удар. CA и средняя сила команды в расчёте эпизодов не участвуют. Талант страны в расчёт матча не входит."},
+	{"id": GROUP_COACHING, "title": "Характер игры и тренер", "short": "Характер и тренер", "hint": "Характер игры определяет подключения в атаке и осторожность. Все команды играют 3-2-2. Характеристики тренера влияют на организацию игры. Даже хороший тренер не заменяет сильных футболистов."},
+	{"id": GROUP_FITNESS, "title": "Выносливость и восстановление", "short": "Выносливость", "hint": "Готовность — запас сил между матчами, от 0 до 100. Работоспособность — насколько игрок устаёт в текущем матче. Выносливость снижает расход сил; Восстановление ускоряет отдых."},
+	{"id": GROUP_LINEUP, "title": "Ротация и правила замен", "short": "Ротация и замены", "hint": "Ротация меняет стартовый состав между матчами. Замены выпускают запасных во время игры. Тренер учитывает позиции, качество скамейки и ожидаемую пользу до конца матча; травмы требуют отдельного решения."},
 ]
 
 static var config_path := DEFAULT_CONFIG_PATH
 static var _loaded := false
 static var _values: Dictionary = {}
 static var _schema_by_key: Dictionary = {}
+static var _fingerprint := ""
+# Derived lookup tables contain no player state and are cleared on every config change.
+static var _curve_tables: Dictionary = {}
+static var _play_table := PackedFloat64Array()
+static var _select_table := PackedFloat64Array()
 
 
 static func schema() -> Array:
-	return [
-		{
-			"key": "chances_per_phase",
-			"group": GROUP_SCORING,
-			"label": "Шансы за фазу",
-			"hint": "Сколько атак в среднем разыгрывается за 5 минут. Больше — живее и результативнее.",
-			"default": MatchTypesScript.CHANCES_PER_PHASE,
-			"min": 0.40,
-			"max": 2.40,
-			"step": 0.02,
-			"decimals": 2,
-			"percent": false,
-			"suffix": "",
-		},
-		{
-			"key": "chance_create_base",
-			"group": GROUP_SCORING,
-			"label": "Шанс создать удар",
-			"hint": "Доля атак, которые становятся ударом, когда создающий и защитник равны.",
-			"default": MatchTypesScript.CHANCE_CREATE_BASE,
-			"min": 0.40,
-			"max": 0.95,
-			"step": 0.01,
-			"decimals": 2,
-			"percent": true,
-			"suffix": "",
-		},
-		{
-			"key": "shot_on_target_base",
-			"group": GROUP_SCORING,
-			"label": "Удар в створ",
-			"hint": "Доля ударов в створ, когда бьющий средний. Сильный удар поднимает долю, слабый роняет.",
-			"default": MatchTypesScript.SHOT_ON_TARGET_BASE,
-			"min": 0.35,
-			"max": 0.85,
-			"step": 0.01,
-			"decimals": 2,
-			"percent": true,
-			"suffix": "",
-		},
-		{
-			"key": "shot_conversion_base",
-			"group": GROUP_SCORING,
-			"label": "Реализация удара в створ",
-			"hint": "Доля голов с удара в створ, когда бьющий и вратарь равны. Разрыв в их характеристиках решает эпизод.",
-			"default": MatchTypesScript.SHOT_CONVERSION_BASE,
-			"min": 0.10,
-			"max": 0.55,
-			"step": 0.01,
-			"decimals": 2,
-			"percent": true,
-			"suffix": "",
-		},
-		{
-			"key": "set_piece_share",
-			"group": GROUP_SCORING,
-			"label": "Доля стандартов",
-			"hint": "Какая часть шансов разыгрывается со стандартов (угловые, штрафные, навесы).",
-			"default": MatchTypesScript.SET_PIECE_SHARE,
-			"min": 0.00,
-			"max": 0.50,
-			"step": 0.01,
-			"decimals": 2,
-			"percent": true,
-			"suffix": "",
-		},
-		{
-			"key": "penalty_per_phase",
-			"group": GROUP_SCORING,
-			"label": "Пенальти за фазу",
-			"hint": "Ожидаемое число пенальти за 5 минут. 0.013 ≈ одно пенальти примерно в 8 матчах.",
-			"default": MatchTypesScript.PENALTY_PER_PHASE,
-			"min": 0.000,
-			"max": 0.050,
-			"step": 0.001,
-			"decimals": 3,
-			"percent": false,
-			"suffix": "",
-		},
-		{
-			"key": "penalty_conversion_base",
-			"group": GROUP_SCORING,
-			"label": "Реализация пенальти",
-			"hint": "Базовая вероятность гола с точки, до навыка бьющего и вратаря.",
-			"default": MatchTypesScript.PENALTY_CONVERSION_BASE,
-			"min": 0.50,
-			"max": 0.95,
-			"step": 0.01,
-			"decimals": 2,
-			"percent": true,
-			"suffix": "",
-		},
-		{
-			"key": "home_advantage",
-			"group": GROUP_BALANCE,
-			"label": "Домашнее преимущество",
-			"hint": "Надбавка к ожидаемым шансам хозяев на своём поле.",
-			"default": MatchTypesScript.HOME_ADVANTAGE,
-			"min": 0.00,
-			"max": 0.25,
-			"step": 0.005,
-			"decimals": 3,
-			"percent": true,
-			"suffix": "",
-		},
-		{
-			"key": "home_reputation_bonus",
-			"group": GROUP_BALANCE,
-			"label": "Бонус репутации хозяев",
-			"hint": "Дополнительная надбавка от репутации клуба (0 при нуле, максимум при 1000).",
-			"default": MatchTypesScript.HOME_REPUTATION_BONUS,
-			"min": 0.00,
-			"max": 0.12,
-			"step": 0.005,
-			"decimals": 3,
-			"percent": true,
-			"suffix": "",
-		},
-		{
-			"key": "team_form_spread",
-			"group": GROUP_BALANCE,
-			"label": "Разброс формы дня",
-			"hint": "Насколько стабильность игрока качает один эпизод. Состав и тренера это не перебивает.",
-			"default": MatchTypesScript.TEAM_FORM_SPREAD,
-			"min": 0.00,
-			"max": 0.30,
-			"step": 0.01,
-			"decimals": 2,
-			"percent": false,
-			"suffix": "",
-		},
-		{
-			"key": "quality_exponent",
-			"group": GROUP_BALANCE,
-			"label": "Экспонента качества",
-			"hint": "Как резко разница состава превращается в удары. Выше — сильный состав давит слабый.",
-			"default": MatchTypesScript.QUALITY_EXPONENT,
-			"min": 0.20,
-			"max": 1.20,
-			"step": 0.05,
-			"decimals": 2,
-			"percent": false,
-			"suffix": "",
-		},
-		{
-			"key": "man_down_penalty",
-			"group": GROUP_BALANCE,
-			"label": "Штраф в меньшинстве",
-			"hint": "На сколько слабее команда после каждого удаления.",
-			"default": MatchTypesScript.MAN_DOWN_PENALTY,
-			"min": 0.00,
-			"max": 0.40,
-			"step": 0.02,
-			"decimals": 2,
-			"percent": true,
-			"suffix": "",
-		},
-		{
-			"key": "yellow_per_phase",
-			"group": GROUP_DISCIPLINE,
-			"label": "Жёлтые за фазу",
-			"hint": "Базовая частота карточек за 5 минут, до строгости судьи и дисциплины тренера.",
-			"default": MatchTypesScript.YELLOW_PER_PHASE,
-			"min": 0.000,
-			"max": 0.400,
-			"step": 0.002,
-			"decimals": 3,
-			"percent": false,
-			"suffix": "",
-		},
-		{
-			"key": "red_direct_share",
-			"group": GROUP_DISCIPLINE,
-			"label": "Доля прямых красных",
-			"hint": "Какая часть карточек сразу становится удалением, а не жёлтой.",
-			"default": MatchTypesScript.RED_DIRECT_SHARE,
-			"min": 0.00,
-			"max": 0.15,
-			"step": 0.002,
-			"decimals": 3,
-			"percent": true,
-			"suffix": "",
-		},
-		{
-			"key": "injury_per_phase",
-			"group": GROUP_DISCIPLINE,
-			"label": "Травмы за фазу",
-			"hint": "Базовая частота травм за 5 минут. Растёт к концу матча и в доп. время.",
-			"default": MatchTypesScript.INJURY_PER_PHASE,
-			"min": 0.000,
-			"max": 0.080,
-			"step": 0.001,
-			"decimals": 3,
-			"percent": false,
-			"suffix": "",
-		},
-		_knob(
-			"condition_after_stamina_1",
-			GROUP_FITNESS,
-			"Кондиция после матча · вын. 1",
-			"Сколько кондиции останется после полных 50 минут, если Выносливость = 1. Старт матча — 100.",
-			MatchTypesScript.CONDITION_AFTER_STAMINA_1,
-			0.0,
-			80.0,
-			1.0,
-			0,
-			false
-		),
-		_knob(
-			"condition_after_stamina_10",
-			GROUP_FITNESS,
-			"Кондиция после матча · вын. 10",
-			"То же при Выносливости 10. Обычный игрок.",
-			MatchTypesScript.CONDITION_AFTER_STAMINA_10,
-			0.0,
-			90.0,
-			1.0,
-			0,
-			false
-		),
-		_knob(
-			"condition_after_stamina_20",
-			GROUP_FITNESS,
-			"Кондиция после матча · вын. 20",
-			"То же при Выносливости 20. Должно быть выше, чем у 10.",
-			MatchTypesScript.CONDITION_AFTER_STAMINA_20,
-			10.0,
-			95.0,
-			1.0,
-			0,
-			false
-		),
-		_knob(
-			"fresh_after_stamina_1",
-			GROUP_FITNESS,
-			"Свежесть к концу матча · вын. 1",
-			"Какая доля сил на поле останется к 50-й минуте при Выносливости 1. 100% = не устал.",
-			MatchTypesScript.FRESH_AFTER_STAMINA_1,
-			0.10,
-			1.00,
-			0.01,
-			2,
-			true
-		),
-		_knob(
-			"fresh_after_stamina_10",
-			GROUP_FITNESS,
-			"Свежесть к концу матча · вын. 10",
-			"То же при Выносливости 10.",
-			MatchTypesScript.FRESH_AFTER_STAMINA_10,
-			0.20,
-			1.00,
-			0.01,
-			2,
-			true
-		),
-		_knob(
-			"fresh_after_stamina_20",
-			GROUP_FITNESS,
-			"Свежесть к концу матча · вын. 20",
-			"То же при Выносливости 20. Должно быть выше, чем у 10.",
-			MatchTypesScript.FRESH_AFTER_STAMINA_20,
-			0.30,
-			1.00,
-			0.01,
-			2,
-			true
-		),
-		_knob(
-			"condition_play_floor",
-			GROUP_FITNESS,
-			"Сила при кондиции 0",
-			"Во сколько раз слабее играет игрок с пустой батарейкой. 100% = кондиция не влияет. Ниже — усталость бьёт сильнее.",
-			MatchTypesScript.CONDITION_FIT_FLOOR,
-			0.30,
-			1.00,
-			0.01,
-			2,
-			true
-		),
-		_knob(
-			"recovery_share_1",
-			GROUP_RECOVERY,
-			"Доля восстановления · восст. 1",
-			"Какую часть недобора до 100 закрывает за один тур игрок с Восстановлением 1.",
-			MatchTypesScript.RECOVERY_SHARE_1,
-			0.05,
-			0.60,
-			0.01,
-			2,
-			true
-		),
-		_knob(
-			"recovery_share_10",
-			GROUP_RECOVERY,
-			"Доля восстановления · восст. 10",
-			"То же при Восстановлении 10.",
-			MatchTypesScript.RECOVERY_SHARE_10,
-			0.10,
-			0.80,
-			0.01,
-			2,
-			true
-		),
-		_knob(
-			"recovery_share_20",
-			GROUP_RECOVERY,
-			"Доля восстановления · восст. 20",
-			"То же при Восстановлении 20. Даже 20 не обязан возвращать к 100 за один тур.",
-			MatchTypesScript.RECOVERY_SHARE_20,
-			0.15,
-			0.95,
-			0.01,
-			2,
-			true
-		),
-		_knob(
-			"recovery_floor",
-			GROUP_RECOVERY,
-			"Минимум восстановления за тур",
-			"Сколько пунктов кондиции дают всегда, плюс доля недобора. Держит совсем пустых чуть живыми.",
-			MatchTypesScript.CONDITION_RECOVERY_FLOOR,
-			0.0,
-			10.0,
-			1.0,
-			0,
-			false
-		),
-		_knob(
-			"recovery_idle_factor",
-			GROUP_RECOVERY,
-			"Бонус, если не играл",
-			"Во сколько раз быстрее восстанавливается тот, кто в этом туре сидел.",
-			MatchTypesScript.CONDITION_IDLE_FACTOR,
-			1.00,
-			2.00,
-			0.05,
-			2,
-			false
-		),
-		_knob(
-			"condition_select_floor",
-			GROUP_LINEUP,
-			"Вес уставшего в заявке",
-			"Насколько слабым тренер считает игрока с кондицией 0, когда выбирает старт. Ниже — звёзды чаще садятся.",
-			MatchTypesScript.CONDITION_SELECT_FLOOR,
-			0.10,
-			0.90,
-			0.01,
-			2,
-			true
-		),
-		_knob(
-			"lineup_rest_below",
-			GROUP_LINEUP,
-			"Порог отдыха",
-			"Ниже этой кондиции тренер дополнительно штрафует игрока и ставит свежего, если он близко по силе.",
-			MatchTypesScript.LINEUP_REST_BELOW,
-			50.0,
-			95.0,
-			1.0,
-			0,
-			false
-		),
+	var knobs := [
+		_knob("chances_per_phase", GROUP_SCORING, "Темп принятия решений", "100% — обычный темп решений. Выше — решения принимаются чаще, ниже — игрок дольше выбирает действие. Настройка сокращает время между решениями футболистов. Моменты возникают из действий на поле.", MatchTypesScript.CHANCES_PER_PHASE, 0.4, 2.4, 0.02, 2, false),
+		_knob("chance_create_base", GROUP_SCORING, "Склонность к ударам", "100% — обычная склонность бить из зоны удара. Выше — чаще бьёт, ниже — чаще продолжает комбинацию. Защитник может помешать удару.", MatchTypesScript.CHANCE_CREATE_BASE, 0.4, 0.95, 0.01, 2, true),
+		_knob("shot_on_target_base", GROUP_SCORING, "Точность ударов", "100% — обычная погрешность прицеливания. Выше — точнее удары. Попадание зависит от завершения и дистанции; значение не равно проценту попаданий.", MatchTypesScript.SHOT_ON_TARGET_BASE, 0.35, 0.85, 0.01, 2, true),
+		_knob("shot_conversion_base", GROUP_SCORING, "Скорость мяча при ударе", "100% — обычная скорость мяча. Выше — мяч летит быстрее, вратарю остаётся меньше времени на реакцию. Гол определяется траекторией, положением и действиями вратаря; значение не равно проценту голов.", MatchTypesScript.SHOT_CONVERSION_BASE, 0.1, 0.55, 0.01, 2, true),
+		_knob("set_piece_share", GROUP_SCORING, "Частота навесов", "Как часто игрок выбирает верховую передачу на фланге. Навес и розыгрыш штрафного выполняются навыком Стандарты; в воздухе важна борьба за мяч.", MatchTypesScript.SET_PIECE_SHARE, 0, 0.5, 0.01, 2, true),
+		_knob("penalty_per_phase", GROUP_SCORING, "Частота пенальти", "Больше — пенальти назначаются чаще. Значение 0.013 — базовая частота на одну команду за 5 минут, примерно одно назначение на 4 матча до игровых поправок.", MatchTypesScript.PENALTY_PER_PHASE, 0, 0.05, 0.001, 3, false),
+		_knob("penalty_conversion_base", GROUP_SCORING, "Точность пенальти", "100% — обычная погрешность удара с точки. Выше — меньше погрешность. Фактический результат зависит от навыка Пенальти, траектории удара, реакции и позиции вратаря. Значение не равно проценту реализации.", MatchTypesScript.PENALTY_CONVERSION_BASE, 0.5, 0.95, 0.01, 2, true),
+		_knob("yellow_per_phase", GROUP_SCORING, "Частота карточек", "Больше — чаще фиксируются нарушения с карточками. 0.09 — базовая частота на команду за 5 минут; строгость судьи и дисциплина игроков меняют итог.", MatchTypesScript.YELLOW_PER_PHASE, 0, 0.4, 0.002, 3, false),
+		_knob("red_direct_share", GROUP_SCORING, "Доля прямых удалений", "Какая часть событий с карточкой сразу становится красной. Больше — больше прямых удалений и неожиданных переломов. Вторая жёлтая считается отдельно.", MatchTypesScript.RED_DIRECT_SHARE, 0, 0.15, 0.002, 3, true),
+		_knob("injury_per_phase", GROUP_SCORING, "Частота травм", "Больше — игроки чаще получают травмы по ходу встречи. Уставшие игроки чаще выбираются пострадавшими; в дополнительное время риск выше. Это базовая частота, не доля травмированных игроков.", MatchTypesScript.INJURY_PER_PHASE, 0, 0.08, 0.001, 3, false),
+		_knob("duel_skill_influence", GROUP_BALANCE, "Влияние личных навыков в эпизодах", "100% — обычная разница в обводке против защиты, силовой борьбе и попытке пробить под давлением. Выше — преимущество навыка в этих единоборствах сильнее; 0% уравнивает их шансы. Точность передач и ударов, быстрота и реакция продолжают работать напрямую и этим ползунком не отключаются.", 1.0, 0, 2, 0.05, 2, true),
+		_knob("tactics_influence", GROUP_COACHING, "Влияние характера игры", "100% — обычная разница между атакующим и оборонительным характером: подключения, передачи и выбор удара. 0% уравнивает эти поправки. Схема всегда 3-2-2.", 1.0, 0, 2, 0.05, 2, true),
+		_knob("coach_influence", GROUP_COACHING, "Влияние мастерства тренера в матче", "100% — обычное влияние тренера на выбор адресата передачи, плотность опеки и интенсивность перемещений. Выше — различие сильного и слабого тренера заметнее; 0% уравнивает эти компоненты. Выбор состава и решения о заменах сохраняются.", 1.0, 0, 2, 0.05, 2, true),
+		_knob("condition_after_stamina_10", GROUP_FITNESS, "Готовность после полного матча: выносливость 10", "60 означает потерю около 40 пунктов за 50 минут при старте со 100 и обычной нагрузке. Для выносливости 20 по умолчанию остаётся 82: такой игрок тратит более чем вдвое меньше готовности. Минуты, нагрузка и возраст меняют расход.", MatchTypesScript.CONDITION_AFTER_STAMINA_10, 0, 90, 1, 0, false),
+		_knob("fresh_after_stamina_10", GROUP_FITNESS, "Работоспособность к концу матча: выносливость 10", "По умолчанию 72% после полных 50 минут при обычной нагрузке; при выносливости 20 — 92%. Усталость снижает скорость и качество действий, а тренер может раньше заменить уставшего игрока. Фактический расход зависит от активности на поле.", MatchTypesScript.FRESH_AFTER_STAMINA_10, 0.2, 1, 0.01, 2, true),
+		_knob("recovery_share_10", GROUP_FITNESS, "Восстановление за игровой день: обычный игрок", "54% восполняет чуть больше половины недостающей готовности, плюс фиксированная прибавка ниже. При готовности 60 это около +22 пунктов до прибавки. Больше — меньше потребность в отдыхе.", MatchTypesScript.RECOVERY_SHARE_10, 0.1, 0.8, 0.01, 2, true),
+		_knob("recovery_floor", GROUP_FITNESS, "Дополнительное восстановление за день", "Прибавка в пунктах готовности сверх процентного восстановления. 3 означает ещё +3 из 100. Больше — быстрее возвращаются силы, меньше — важнее запасные.", MatchTypesScript.CONDITION_RECOVERY_FLOOR, 0, 10, 1, 0, false),
+		_knob("recovery_idle_factor", GROUP_FITNESS, "Бонус отдыха пропустившим матч", "1.25× — процентная часть восстановления на 25% быстрее у тех, кто не играл. Больше — выгоднее дать игроку день отдыха; 1× — этого бонуса нет.", MatchTypesScript.CONDITION_IDLE_FACTOR, 1, 2, 0.05, 2, false),
+		_knob("condition_play_floor", GROUP_FITNESS, "Работоспособность при нулевой готовности", "86% — нижний предел влияния готовности на силу в эпизодах до усталости внутри матча. Ниже — измотанный игрок играет слабее. При 100% готовность перестаёт влиять на этот множитель.", MatchTypesScript.CONDITION_FIT_FLOOR, 0.3, 1, 0.01, 2, true),
+		_knob("condition_after_stamina_1", GROUP_FITNESS, "Готовность после матча: выносливость 1", "Низкая выносливость. Меньше оставшихся пунктов — тяжелее восстановиться после игры. Для промежуточных характеристик значение рассчитывается между соседними опорными точками.", MatchTypesScript.CONDITION_AFTER_STAMINA_1, 0, 80, 1, 0, false),
+		_knob("condition_after_stamina_20", GROUP_FITNESS, "Готовность после матча: выносливость 20", "Высокая выносливость. Значение должно быть не ниже, чем у обычного игрока. Больше — меньше потеря готовности после полной игры.", MatchTypesScript.CONDITION_AFTER_STAMINA_20, 10, 95, 1, 0, false),
+		_knob("fresh_after_stamina_1", GROUP_FITNESS, "Работоспособность к концу матча: выносливость 1", "Низкая выносливость. Ниже — сильнее падение силы на поле. Пример: 75% означает примерно четверть потери работоспособности при обычной нагрузке.", MatchTypesScript.FRESH_AFTER_STAMINA_1, 0.1, 1, 0.01, 2, true),
+		_knob("fresh_after_stamina_20", GROUP_FITNESS, "Работоспособность к концу матча: выносливость 20", "Высокая выносливость. Выше — дольше играет без сильной усталости. Значение должно быть не ниже, чем у обычного игрока.", MatchTypesScript.FRESH_AFTER_STAMINA_20, 0.3, 1, 0.01, 2, true),
+		_knob("recovery_share_1", GROUP_FITNESS, "Восстановление за день: характеристика 1", "Слабое восстановление. Больше — быстрее восполняется недостающая готовность; меньше — дольше нужен отдых.", MatchTypesScript.RECOVERY_SHARE_1, 0.05, 0.6, 0.01, 2, true),
+		_knob("recovery_share_20", GROUP_FITNESS, "Восстановление за день: характеристика 20", "Сильное восстановление. Даже высокий показатель не обязан возвращать готовность к 100 за один день. Значение должно быть не ниже, чем у обычного игрока.", MatchTypesScript.RECOVERY_SHARE_20, 0.15, 0.95, 0.01, 2, true),
+		_knob("lineup_rest_below", GROUP_LINEUP, "Готовность, ниже которой нужен отдых", "Ниже 82 из 100 тренер сильнее предпочитает свежего конкурента на той же позиции. Больше — чаще меняется стартовый состав, меньше — чаще выходят основные игроки.", MatchTypesScript.LINEUP_REST_BELOW, 50, 95, 1, 0, false),
+		_knob("rotation_fatigue_weight", GROUP_LINEUP, "Насколько тренер учитывает усталость при выборе старта", "100% — обычная ротация по готовности и качеству. Больше — чаще стартуют свежие запасные; 0% — готовность не учитывается при выборе, но продолжает влиять на игру.", 1.0, 0, 2.5, 0.05, 2, true),
+		_knob("subs_max", GROUP_LINEUP, "Максимум замен на команду", "Предел на весь матч, включая дополнительное время. 5 — до пяти замен. 0 запрещает все замены, в том числе при травме. Это предел, а не обязанность выпустить слабую скамейку.", 5.0, 0, 5, 1, 0, false),
+		_knob("subs_first_minute", GROUP_LINEUP, "С какой минуты делать плановые замены", "25 — тренер начинает освежать состав со второго тайма. Меньше — раньше, больше — позже. Проверка идёт раз в 5 минут; травмы и экстренная замена вратаря не ждут этой минуты.", 25.0, 10, 40, 5, 0, false),
+		_knob("subs_freshness_threshold", GROUP_LINEUP, "Работоспособность, при которой искать замену", "При 94% тренер рассматривает замену, когда игрок потерял хотя бы 6% работоспособности. Выше — раньше и чаще. Замена произойдёт только при подходящем запасном.", 0.94, 0.7, 1, 0.01, 2, true),
+		_knob("subs_min_gain", GROUP_LINEUP, "Минимальная ожидаемая польза замены", "2% — запасной должен быть полезнее минимум на 2% в среднем до конца матча, с учётом дальнейшей усталости. Меньше — охотнее использует скамейку; больше — чаще сохраняет основу.", 0.02, 0, 0.2, 0.01, 2, true),
+		_knob("subs_min_quality", GROUP_LINEUP, "Минимальное качество запасного", "85% — запасной должен сохранять хотя бы 85% полезности заменяемого по навыкам и позиции без усталости. Ниже — глубже ротация, но возможнее ослабление команды. Выше — строже отбор.", 0.85, 0.5, 1, 0.01, 2, true),
+		_knob("subs_reserve_until", GROUP_LINEUP, "До какой минуты беречь последнюю замену", "40 — до этой минуты тренер сохраняет одну замену на случай травмы. После может потратить её на полезное усиление. Больше — дольше держит резерв.", 40.0, 25, 50, 5, 0, false),
+		_knob("condition_select_floor", GROUP_LINEUP, "Оценка игрока при готовности 0", "32% — настолько низко тренер оценивает измотанного игрока при выборе старта, ещё до дополнительного штрафа ниже порога отдыха. Меньше — охотнее даёт отдых. Силу на поле настраивают отдельно.", MatchTypesScript.CONDITION_SELECT_FLOOR, 0.1, 0.9, 0.01, 2, true),
 	]
-
+	var advanced := ["set_piece_share", "penalty_per_phase", "penalty_conversion_base", "yellow_per_phase", "red_direct_share", "injury_per_phase", "condition_play_floor", "condition_after_stamina_1", "condition_after_stamina_20", "fresh_after_stamina_1", "fresh_after_stamina_20", "recovery_share_1", "recovery_share_20", "condition_select_floor"]
+	for knob in knobs:
+		knob["advanced"] = str(knob.key) in advanced
+		if knob.key in ["chances_per_phase","chance_create_base","shot_on_target_base","shot_conversion_base","penalty_conversion_base"]:
+			knob["display_scale"] = 1.0 / float(knob.default)
+			knob["percent"] = true
+			knob["decimals"] = 2
+		if knob.key in ["subs_first_minute", "subs_reserve_until"]:
+			knob["suffix"] = " мин"
+		if knob.key == "recovery_idle_factor":
+			knob["suffix"] = "×"
+	return knobs
 
 static func knob_by_key(key: String) -> Dictionary:
 	_ensure_schema_index()
@@ -429,6 +92,16 @@ static func knob_by_key(key: String) -> Dictionary:
 	if typeof(row) == TYPE_DICTIONARY:
 		return row
 	return {}
+
+
+## Explain contradictory editor values before saving; old files still load intact.
+static func validation_error(values: Dictionary) -> String:
+	for prefix in ["condition_after_stamina_", "fresh_after_stamina_", "recovery_share_"]:
+		if float(values[prefix + "1"]) > float(values[prefix + "10"]) or float(values[prefix + "10"]) > float(values[prefix + "20"]):
+			return "Высокая характеристика должна помогать: значения для 1, 10 и 20 должны идти по возрастанию. Проверьте раздел «Выносливость»."
+	if float(values.subs_reserve_until) < float(values.subs_first_minute):
+		return "Последнюю замену нужно беречь хотя бы до начала плановых замен. Проверьте минуты в разделе «Ротация и замены»."
+	return ""
 
 
 static func default_values() -> Dictionary:
@@ -441,6 +114,14 @@ static func default_values() -> Dictionary:
 static func snapshot() -> Dictionary:
 	_ensure_loaded()
 	return _values.duplicate()
+
+
+## Cached once per configuration change, rather than hashing for every phase.
+static func fingerprint() -> String:
+	_ensure_loaded()
+	if _fingerprint.is_empty():
+		_fingerprint = JSON.stringify(_values).sha256_text()
+	return _fingerprint
 
 
 static func get_f(key: String) -> float:
@@ -462,30 +143,52 @@ static func lerp_three(attr: int, value_1: float, value_10: float, value_20: flo
 
 
 static func curve_attr(attr: int, key_1: String, key_10: String, key_20: String) -> float:
-	return lerp_three(attr, get_f(key_1), get_f(key_10), get_f(key_20))
+	_ensure_loaded()
+	var key := key_1 + "|" + key_10 + "|" + key_20
+	if not _curve_tables.has(key):
+		var table := PackedFloat64Array()
+		var low := get_f(key_1)
+		var middle := get_f(key_10)
+		var high := get_f(key_20)
+		for value in 21:
+			table.append(lerp_three(value, low, middle, high))
+		_curve_tables[key] = table
+	return float(_curve_tables[key][clampi(attr, 1, 20)])
 
 
 static func condition_play_mult(condition: int) -> float:
-	var floor_v := clampf(get_f("condition_play_floor"), 0.0, 1.0)
-	var scaled := clampf(
-		float(MatchTypesScript.clamp_condition(condition)) / float(MatchTypesScript.CONDITION_MAX),
-		0.0,
-		1.0
-	)
-	return floor_v + (1.0 - floor_v) * scaled
+	_ensure_loaded()
+	if _play_table.is_empty():
+		_build_condition_tables()
+	return _play_table[MatchTypesScript.clamp_condition(condition)]
 
 
-## Coaches rest people harder than the on-pitch penalty: a star at 70 condition
-## should lose the slot to a decent fresh deputy.
-static func condition_select_mult(condition: int) -> float:
-	var c := float(MatchTypesScript.clamp_condition(condition))
+## Exactly the same equations as the editor knobs, evaluated once per 0–100 value.
+static func _build_condition_tables() -> void:
 	var maxv := float(MatchTypesScript.CONDITION_MAX)
-	var floor_v := clampf(get_f("condition_select_floor"), 0.0, 1.0)
+	var play_floor := clampf(get_f("condition_play_floor"), 0.0, 1.0)
+	var select_floor := clampf(get_f("condition_select_floor"), 0.0, 1.0)
 	var rest := clampf(get_f("lineup_rest_below"), 1.0, maxv)
-	var linear := floor_v + (1.0 - floor_v) * (c / maxv)
-	if c >= rest:
-		return linear
-	return linear * (c / rest)
+	var weight := get_f("rotation_fatigue_weight")
+	for value in MatchTypesScript.CONDITION_MAX + 1:
+		var c := float(value)
+		var scaled := clampf(c / maxv, 0.0, 1.0)
+		_play_table.append(play_floor + (1.0 - play_floor) * scaled)
+		var linear := select_floor + (1.0 - select_floor) * (c / maxv)
+		_select_table.append(pow(linear if c >= rest else linear * (c / rest), weight))
+
+
+static func condition_select_mult(condition: int) -> float:
+	_ensure_loaded()
+	if _select_table.is_empty():
+		_build_condition_tables()
+	return _select_table[MatchTypesScript.clamp_condition(condition)]
+
+
+static func _clear_derived_tables() -> void:
+	_curve_tables.clear()
+	_play_table = PackedFloat64Array()
+	_select_table = PackedFloat64Array()
 
 
 static func editor_values() -> Dictionary:
@@ -498,6 +201,8 @@ static func apply_values(values: Dictionary, persist: bool) -> Dictionary:
 		if values.has(key):
 			next[key] = _clamp_knob(knob_by_key(str(key)), float(values[key]))
 	_values = next
+	_clear_derived_tables()
+	_fingerprint = ""
 	_loaded = true
 	if not persist:
 		return {"ok": true, "error": ""}
@@ -512,11 +217,14 @@ static func reset_to_defaults(persist: bool = false) -> Dictionary:
 
 
 static func unload() -> void:
+	_clear_derived_tables()
 	_loaded = false
 	_values = {}
+	_fingerprint = ""
 
 
 static func format_value(knob: Dictionary, value: float) -> String:
+	value *= float(knob.get("display_scale", 1.0))
 	if bool(knob.get("percent", false)):
 		var shown := maxi(int(knob.get("decimals", 2)) - 2, 0)
 		return ("%." + str(shown) + "f%%") % (value * 100.0)
@@ -575,6 +283,11 @@ static func _load_from_disk() -> bool:
 		return false
 	_values = default_values()
 	for key in _values.keys():
+		# One-time stamina rebalance; preserve all unrelated user settings.
+		if int(data.get("version", 0)) < 8 and (str(key).begins_with("condition_after_stamina_") or str(key).begins_with("fresh_after_stamina_")):
+			continue
+		if int(data.get("version", 0)) < 7 and str(key) in ["chances_per_phase", "chance_create_base", "shot_on_target_base", "shot_conversion_base", "duel_skill_influence"]:
+			continue
 		if (raw as Dictionary).has(key):
 			_values[key] = _clamp_knob(knob_by_key(str(key)), float((raw as Dictionary)[key]))
 	return true

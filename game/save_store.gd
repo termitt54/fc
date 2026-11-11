@@ -18,6 +18,8 @@ const SECTIONS := [
 	"reserve_players_by_club",
 	"free_agents",
 	"coaches_by_club",
+	"coach_market",
+	"national_teams",
 	"club_budgets",
 	"transfer_log",
 ]
@@ -136,6 +138,12 @@ func load_slot(slot: String) -> Dictionary:
 		"history_head": history_head,
 	}
 	for section in SECTIONS:
+		if not bodies.has(section) and section == "national_teams" and int(meta.get("version", 0)) < 13:
+			payload[section] = {}
+			continue
+		if not bodies.has(section) and section == "coach_market" and int(meta.get("version", 0)) < 12:
+			payload[section] = {}
+			continue
 		if not bodies.has(section):
 			return DbResult.fail("Повреждённое сохранение: нет секции %s" % section)
 		var decoded: Variant = _decode(bodies[section])
@@ -150,6 +158,8 @@ func write_slot(slot: String, meta: Dictionary, sections: Dictionary) -> Diction
 		return DbResult.fail("Некорректное имя сохранения")
 	var encoded: Dictionary = {}
 	for section in SECTIONS:
+		if not sections.has(section) and section in ["coach_market", "national_teams"]:
+			sections[section] = {}
 		if not sections.has(section):
 			return DbResult.fail("Не хватает секции сохранения %s" % section)
 		var bytes := _encode(sections[section])
@@ -228,6 +238,69 @@ func append_history(head: int, records: Array) -> Dictionary:
 		return _fail_write(str(_db.error_message))
 	_close()
 	return written
+
+
+func tournament_season(head: int, unit_id: int, season: int) -> Dictionary:
+	if not _open():
+		return DbResult.fail(_last_error)
+	if not HISTORY.head_exists(_db, head):
+		_close()
+		return DbResult.fail("Не найдена версия истории")
+	var rows: Variant = _select(HISTORY.ANCESTORS + "SELECT body FROM save_history_tournaments WHERE history_id IN (SELECT id FROM ancestry) AND unit_id = ? AND season = ? ORDER BY history_id DESC LIMIT 1;", [head, head, unit_id, season])
+	_close()
+	if rows == null:
+		return DbResult.fail(_last_error)
+	if rows.is_empty():
+		return DbResult.ok({})
+	return _decode_tournament_body(rows[0]["body"])
+
+
+## Player-stat bags for every archived edition of one tournament, oldest season first.
+## skip_season is the live season: it is still on the unit and must not be counted twice.
+func tournament_stat_bags(head: int, unit_id: int, skip_season: int) -> Dictionary:
+	if head <= 0 or unit_id < 1:
+		return DbResult.ok([])
+	if not _open():
+		return DbResult.fail(_last_error)
+	if not HISTORY.head_exists(_db, head):
+		_close()
+		return DbResult.fail("Не найдена версия истории")
+	var rows: Variant = _select(
+		HISTORY.ANCESTORS + "SELECT season, body FROM save_history_tournaments WHERE history_id IN (SELECT id FROM ancestry) AND unit_id = ? ORDER BY season ASC, history_id DESC;",
+		[head, head, unit_id]
+	)
+	_close()
+	if rows == null:
+		return DbResult.fail(_last_error)
+	var bags: Array = []
+	var seen: Dictionary = {}
+	for row in rows:
+		var season := int(row.get("season", 0))
+		if season < 1 or season == skip_season or seen.has(season):
+			continue
+		seen[season] = true
+		var decoded := _decode_tournament_body(row.get("body", PackedByteArray()))
+		if not decoded.get("success", false):
+			return decoded
+		var snap: Dictionary = decoded.get("data", {})
+		var bag: Variant = snap.get("season_player_stats", {})
+		if typeof(bag) == TYPE_DICTIONARY and not (bag as Dictionary).is_empty():
+			bags.append(bag)
+	return DbResult.ok(bags)
+
+
+func _decode_tournament_body(raw_body: Variant) -> Dictionary:
+	var compressed: PackedByteArray = raw_body if raw_body is PackedByteArray else PackedByteArray()
+	if compressed.size() < 5:
+		return DbResult.fail("Повреждён архив сезона")
+	var raw_size := int(compressed.decode_u32(0))
+	if raw_size < 4 or raw_size > 134217728:
+		return DbResult.fail("Некорректный размер архива сезона")
+	var raw := compressed.slice(4).decompress(raw_size, FileAccess.COMPRESSION_ZSTD)
+	if raw.size() != raw_size:
+		return DbResult.fail("Повреждён архив сезона")
+	var decoded: Variant = bytes_to_var(raw)
+	return DbResult.ok(decoded) if decoded is Dictionary else DbResult.fail("Повреждён архив сезона")
 
 
 func delete_slot(slot: String) -> Dictionary:

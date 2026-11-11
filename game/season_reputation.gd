@@ -1,20 +1,23 @@
 class_name SeasonReputation
 extends RefCounted
 ## One reputation tick when a season closes.
-## The preview is the expectation. Division strength (0–1000) is the level of the
-## competition: the same finish moves a club further in a stronger division.
+## The preview is the expectation. Prestige follows results slowly, with both
+## the configured competition level and its participants supplying context.
 ## Clubs move first. Players then take a small share of that result, scaled by
 ## minutes, and a personal bump when their rating beats what their ability suggests.
 ## A player's whole season, including the usual fame drift, stays inside the drift cap.
 
 
 const CLUB_CAP := 20
-const LEVEL_PULL := 8
-const SURPRISE_SPAN := 32.0
-const BAND_SHARE := 0.22
+const LEVEL_PULL := 4
+const LEVEL_RATE := 0.02
+const LEVEL_REFERENCE_RATIO := 0.80
+const FINISH_SPAN := 120.0
+const ACHIEVEMENT_HEADROOM := 200.0
+const SURPRISE_SPAN := 8.0
 const PLAYER_RESULT_CAP := 15
 const FULL_SEASON_MATCHES := 24.0
-const PLAYER_SPILL := 0.35
+const PLAYER_SPILL := 0.10
 
 
 static func plan(units: Array, season_number: int, lookup: Callable) -> Dictionary:
@@ -33,9 +36,10 @@ static func plan(units: Array, season_number: int, lookup: Callable) -> Dictiona
 	for club_id in parts:
 		var current := _club_reputation(units, int(club_id))
 		var delta := combine_club(current, parts[club_id])
+		var next_reputation := PlayerTypes.clamp_reputation(current + delta)
 		clubs[club_id] = {
-			"reputation": PlayerTypes.clamp_reputation(current + delta),
-			"delta": delta,
+			"reputation": next_reputation,
+			"delta": next_reputation - current,
 		}
 	var players := {}
 	var before := {}
@@ -43,6 +47,13 @@ static func plan(units: Array, season_number: int, lookup: Callable) -> Dictiona
 		if typeof(unit) != TYPE_DICTIONARY or not season_ready(unit):
 			continue
 		var strength := competition_strength(unit)
+		var club_minutes := {}
+		for match_row in unit.get("matches", []):
+			if not bool(match_row.get("played", false)):
+				continue
+			var duration := MatchTypes.REGULAR_MINUTES + (MatchTypes.ET_MINUTES if bool(match_row.get("extra_time", false)) else 0)
+			for id in [int(match_row.get("home_id", 0)), int(match_row.get("away_id", 0))]:
+				club_minutes[id] = int(club_minutes.get(id, 0)) + duration
 		var bag: Dictionary = UnitSeasonStats.ensure(unit)
 		for player_id in bag.keys():
 			var row: Dictionary = bag[player_id]
@@ -54,7 +65,15 @@ static func plan(units: Array, season_number: int, lookup: Callable) -> Dictiona
 			var player: Dictionary = lookup.call(int(player_id))
 			var ability := int(player.get("current_ability", 50)) if not player.is_empty() else 50
 			var rating := float(row.get("rating_sum", 0.0)) / float(matches)
-			var piece := player_adjustment(strength, club_delta, matches, rating, ability)
+			# Old saves lack unit minutes: apportion the player's recorded minutes
+			# by appearances in this unit, rather than treating a cameo as a full match.
+			var minutes := int(row.get("minutes", -1))
+			if minutes < 0:
+				var season_stats := PlayerStats.season_of(player) if not player.is_empty() else {}
+				minutes = int(round(float(season_stats.get("minutes", 0)) * float(matches) / maxf(float(season_stats.get("matches", matches)), 1.0)))
+			var reference := maxi(int(club_minutes.get(played_for, 0)), int(FULL_SEASON_MATCHES * MatchTypes.REGULAR_MINUTES))
+			var piece := player_adjustment(strength, club_delta, matches, rating, ability,
+				minutes, reference, int(player.get("reputation", 0)))
 			var key := int(player_id)
 			players[key] = clampi(int(players.get(key, 0)) + piece, -PLAYER_RESULT_CAP, PLAYER_RESULT_CAP)
 			if not before.has(key) and not player.is_empty():
@@ -92,11 +111,11 @@ static func write_players(deltas: Dictionary, before: Dictionary, lookup: Callab
 		PlayerMarket.refresh_value(player)
 
 
-## Surprise against the preview, plus a short pull toward the finish's band around the division strength.
-static func table_delta(strength: int, current: int, predicted: int, actual: int, field: int) -> int:
+## Omitting participant reputation uses the competition's neutral prestige level.
+static func table_delta(strength: int, current: int, predicted: int, actual: int, field: int, participants: float = -1.0) -> int:
 	return combine_club(current, [{
-		"step": _place_step(strength, predicted, actual, field),
-		"pull": _level_pull(strength, actual, field, current),
+		"step": _table_step(strength, current, predicted, actual, field, participants),
+		"pull": _level_pull(strength, actual, field, current, participants),
 		"strength": strength,
 	}])
 
@@ -105,24 +124,31 @@ static func table_delta(strength: int, current: int, predicted: int, actual: int
 static func chance_delta(strength: int, current: int, title_chance: float, won: bool) -> int:
 	var pull := 0
 	if won:
-		pull = clampi(strength - current, -LEVEL_PULL, LEVEL_PULL)
+		pull = maxi(0, _level_pull(strength, 1, 2, current))
 	return combine_club(current, [{
-		"step": _chance_step(strength, title_chance, won),
+		"step": _chance_step(strength, title_chance, won) * (_achievement_headroom(strength, current) if won else 1.0),
 		"pull": pull,
 		"strength": strength,
 	}])
 
 
 static func combine_club(_current: int, parts: Array) -> int:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return int(native.reputation_calc("combine",{"parts":parts}))
 	var step := 0.0
 	var best_strength := -1
+	var best_priority := -1
 	var pull := 0
 	for part in parts:
 		if typeof(part) != TYPE_DICTIONARY:
 			continue
 		step += float(part.get("step", 0.0))
 		var strength := int(part.get("strength", 0))
-		if strength > best_strength:
+		# A cup's missing table must not erase the league's prestige adjustment.
+		var priority := 1 if bool(part.get("table_anchor", false)) else 0
+		if priority > best_priority or (priority == best_priority and strength > best_strength):
+			best_priority = priority
 			best_strength = strength
 			pull = int(part.get("pull", 0))
 	return clampi(int(round(step)) + pull, -CLUB_CAP, CLUB_CAP)
@@ -133,15 +159,27 @@ static func player_adjustment(
 	club_delta: int,
 	matches: int,
 	rating: float,
-	current_ability: int
+	current_ability: int,
+	minutes: int = -1,
+	season_minutes: int = 1200,
+	current_reputation: int = -1
 ) -> int:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return int(native.reputation_calc("player",{"strength":strength,"club_delta":club_delta,"matches":matches,"rating":rating,"ability":current_ability,"minutes":minutes,"season_minutes":season_minutes,"reputation":current_reputation}))
 	if matches < 1:
 		return 0
-	var share := clampf(float(matches) / FULL_SEASON_MATCHES, 0.0, 1.0)
+	var played := minutes if minutes >= 0 else matches * MatchTypes.REGULAR_MINUTES
+	var share := clampf(float(played) / maxf(float(season_minutes), 1.0), 0.0, 1.0)
 	var expected := 6.15 + float(current_ability - 50) * 0.025
 	var gap := clampf(rating - expected, -1.6, 1.6)
 	var weight := clampf(float(strength) / 1000.0, 0.0, 1.0)
-	var personal := gap / 1.6 * 12.0 * share * weight
+	var personal := gap / 1.6 * 8.0 * share * weight
+	# Ability is a ceiling for sustained recognition, not an automatic annual gift.
+	# Actual exposure and performance determine movement, without club-name fame.
+	var recognition := clampf(float(current_ability) * 10.0 * (0.45 + 0.55 * weight) + gap * 50.0, 0.0, 1000.0)
+	if current_reputation >= 0:
+		personal += clampf((recognition - float(current_reputation)) * 0.04, -10.0, 10.0) * share
 	var spill := float(club_delta) * PLAYER_SPILL * share
 	return clampi(int(round(personal + spill)), -PLAYER_RESULT_CAP, PLAYER_RESULT_CAP)
 
@@ -176,50 +214,53 @@ static func competition_strength(unit: Dictionary) -> int:
 
 static func _club_parts(unit: Dictionary, season_number: int) -> Array:
 	var strength := competition_strength(unit)
+	var participants := float(_average_reputation(unit))
 	var preview_ok := _preview_matches(unit, season_number)
-	var playoff_places := _playoff_place_map(unit)
 	var champion_id := _champion_id(unit, season_number)
-	var table := _table_section_for(unit, -1)
+	var playoff_places := _playoff_place_map(unit)
+	if champion_id > 0 and bool(unit.get("playoff", {}).get("enabled", false)):
+		playoff_places[champion_id] = 1
+	var has_table: bool = not unit.get("standings", []).is_empty()
+	var tables := {}
 	var parts: Array = []
 	for club_id in _result_club_ids(unit):
-		var playoff_place := int(playoff_places.get(club_id, 0))
-		if playoff_place > 0:
-			var section := _section(unit, "playoff", -1)
-			var field := _field_size(section, playoff_places.size())
-			var predicted := _predicted_place(section, club_id, playoff_place) if preview_ok else playoff_place
-			var current := _reputation_of(unit, club_id)
-			parts.append({
-				"club_id": club_id,
-				"step": _place_step(strength, predicted, playoff_place, field),
-				"pull": _level_pull(strength, playoff_place, field, current),
-				"strength": strength,
-			})
-			continue
 		var division := _club_division(unit, club_id)
 		var section := _table_section_for(unit, division)
-		if not section.is_empty():
-			var ranked := _ranked(unit, _rank_filter(unit, section))
+		if has_table:
+			var filter := _rank_filter(unit, section) if not section.is_empty() else (-1 if bool(unit.get("rules", {}).get("regular_season_enabled", false)) else division)
+			if not tables.has(filter):
+				tables[filter] = _ranked(unit, filter)
+			var ranked: Array = tables[filter]
 			var actual := _index_of(ranked, club_id)
 			if actual < 1:
 				continue
 			var predicted := _predicted_place(section, club_id, actual) if preview_ok else actual
 			var current := _reputation_of(unit, club_id)
+			var bonus := _achievement_bonus(strength, current, int(playoff_places.get(club_id, 0)), participants)
+			var pull := _level_pull(strength, actual, ranked.size(), current, participants)
+			var step := _table_step(strength, current, predicted, actual, ranked.size(), participants) + bonus
+			# A title can preserve an already prestigious club rather than increase
+			# it; poor results in another competition may still lower the total.
+			if club_id == champion_id:
+				step = maxf(step, float(-pull))
 			parts.append({
 				"club_id": club_id,
-				"step": _place_step(strength, predicted, actual, ranked.size()),
-				"pull": _level_pull(strength, actual, ranked.size(), current),
+				"step": step,
+				"pull": pull,
 				"strength": strength,
+				"table_anchor": true,
 			})
 			continue
-		if table.is_empty() and champion_id > 0 and preview_ok:
+		if champion_id > 0:
 			var knockout := _knockout_section(unit)
 			var chance := _title_chance(knockout, club_id) if preview_ok else 0.0
 			var current := _reputation_of(unit, club_id)
 			var won: bool = club_id == champion_id
-			var pull := clampi(strength - current, -LEVEL_PULL, LEVEL_PULL) if won else 0
+			var pull := maxi(0, _level_pull(strength, 1, 2, current, participants)) if won else 0
+			var bonus := _achievement_bonus(strength, current, int(playoff_places.get(club_id, 0)), participants)
 			parts.append({
 				"club_id": club_id,
-				"step": _chance_step(strength, chance, won),
+				"step": _chance_step(strength, chance, won) * (_achievement_headroom(strength, current, participants) if won else 1.0) + bonus,
 				"pull": pull,
 				"strength": strength,
 			})
@@ -234,18 +275,61 @@ static func _place_step(strength: int, predicted: int, actual: int, field: int) 
 	return norm * SURPRISE_SPAN * clampf(float(strength) / 1000.0, 0.0, 1.0)
 
 
+static func _table_step(strength: int, current: int, predicted: int, actual: int, field: int, participants: float = -1.0) -> float:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return float(native.reputation_calc("table_step",{"strength":strength,"current":current,"predicted":predicted,"actual":actual,"field":field,"participants":participants}))
+	var surprise := _place_step(strength, predicted, actual, field)
+	return surprise * _achievement_headroom(strength, current, participants) if surprise > 0.0 else surprise
+
+
 static func _chance_step(strength: int, title_chance: float, won: bool) -> float:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return float(native.reputation_calc("chance_step",{"strength":strength,"chance":title_chance,"won":won}))
 	var chance := clampf(title_chance / 100.0, 0.0, 1.0)
 	var surprise := (1.0 - chance) if won else -chance
 	return surprise * SURPRISE_SPAN * clampf(float(strength) / 1000.0, 0.0, 1.0)
 
 
-static func _level_pull(strength: int, actual: int, field: int, current: int) -> int:
+static func _prestige_reference(strength: int, participants: float = -1.0) -> float:
+	var configured := float(strength) * LEVEL_REFERENCE_RATIO
+	if participants < 0.0:
+		return configured
+	return (configured + clampf(participants, 0.0, 1000.0)) * 0.5
+
+
+static func _achievement_bonus(strength: int, current: int, place: int, participants: float = -1.0) -> float:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return float(native.reputation_calc("bonus",{"strength":strength,"current":current,"actual":place,"participants":participants}))
+	var base := 0.0
+	match place:
+		1: base = 8.0
+		2: base = 4.0
+		3: base = 2.0
+		4: base = 1.0
+	return base * (0.5 + 0.5 * clampf(float(strength) / 1000.0, 0.0, 1.0)) * _achievement_headroom(strength, current, participants)
+
+
+static func _achievement_headroom(strength: int, current: int, participants: float = -1.0) -> float:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return float(native.reputation_calc("headroom",{"strength":strength,"current":current,"participants":participants}))
+	var ceiling := minf(1000.0, _prestige_reference(strength, participants) + ACHIEVEMENT_HEADROOM)
+	return clampf((ceiling - float(current)) / 100.0, 0.0, 1.0)
+
+
+static func _level_pull(strength: int, actual: int, field: int, current: int, participants: float = -1.0) -> int:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return int(native.reputation_calc("pull",{"strength":strength,"current":current,"actual":actual,"field":field,"participants":participants}))
 	if field < 2 or actual < 1:
 		return 0
-	var mid := 0.5 - float(actual - 1) / float(field - 1)
-	var band := float(strength) + mid * BAND_SHARE * float(strength)
-	return clampi(int(round(band)) - current, -LEVEL_PULL, LEVEL_PULL)
+	var percentile := 1.0 - float(actual - 1) / float(field - 1)
+	var target := clampf(_prestige_reference(strength, participants) + FINISH_SPAN * (2.0 * percentile - 1.0), 0.0, 1000.0)
+	# The stored reputation carries past achievements; convergence takes seasons.
+	return clampi(int(round((target - float(current)) * LEVEL_RATE)), -LEVEL_PULL, LEVEL_PULL)
 
 
 static func _preview_matches(unit: Dictionary, season_number: int) -> bool:

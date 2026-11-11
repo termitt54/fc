@@ -4,6 +4,8 @@ extends VBoxContainer
 
 
 signal closed
+signal player_requested(player_id: int)
+signal coach_requested(coach_id: int)
 
 const FLAG_SIZE := Vector2(72, 48)
 const SQUAD_FIRST := 0
@@ -117,6 +119,8 @@ func get_country_id() -> int:
 func _load_country(country_id: int) -> Dictionary:
 	if country_id < 1:
 		return {}
+	var team: Dictionary = GameSession.national_teams.get(country_id, {})
+	if not team.is_empty(): return team.country
 	var result: Dictionary = CountryRepository.new().get_by_id(country_id)
 	if result.get("success", false):
 		return result.get("data", {})
@@ -143,6 +147,10 @@ func _build_identity() -> void:
 	var clubs_count := int(_country.get("clubs_count", 0))
 	if clubs_count > 0:
 		parts.append("%d клубов" % clubs_count)
+	var team: Dictionary = GameSession.national_teams.get(_country_id, {})
+	if team.has("rating"):
+		parts.append("Elo %.1f (%+.1f за турнир)" % [float(team.rating.elo), float(team.rating.edition_delta)])
+	parts.append("Талант %d" % int(_country.get("youth_talent", 50)))
 	_meta_label.text = " · ".join(parts) if not parts.is_empty() else "Национальная сборная"
 
 	if _stars != null:
@@ -200,18 +208,60 @@ func _build_squad_list() -> void:
 		return
 	_clear_host(_squad_list_host)
 
+	var team: Dictionary = GameSession.national_teams.get(_country_id, {})
+	var squad := NationalTeams.roster(GameSession, NationalTeams.team_id(_country_id))
 	var count_label := _squad_host.find_child("SquadCount", true, false) as Label
 	if count_label != null:
-		count_label.text = "0 игроков"
-
+		count_label.text = "%d / %d игроков" % [squad.size(),NationalTeams.SQUAD_SIZE]
 	if _squad_mode == SQUAD_YOUTH:
 		_squad_list_host.add_child(_hint("Молодёжная сборная появится позже"))
-	else:
-		_squad_list_host.add_child(_hint("Состав национальной сборной появится позже"))
+		return
+	if squad.is_empty():
+		_squad_list_host.add_child(_hint("Тренер объявит заявку перед международным турниром, после завершения клубного сезона."))
+		return
+	_squad_list_host.add_child(_hint("Заявка зафиксирована · Сезон %d · Замены травмированных запрещены" % int(team.get("registered_season", 0))))
+	if squad.size() < NationalTeams.SQUAD_SIZE:
+		_squad_list_host.add_child(_hint("В мире недостаточно здоровых игроков этой национальности для полной заявки."))
+	var tree := Tree.new()
+	tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tree.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tree.hide_root = true
+	tree.columns = 6
+	tree.column_titles_visible = true
+	var titles := ["Поз", "Игрок", "Клуб", "Возраст", "CA", "Статус"]
+	for i in titles.size():
+		tree.set_column_title(i, titles[i])
+		tree.set_column_expand(i, i in [1, 2, 5])
+		tree.set_column_custom_minimum_width(i, 55)
+	_squad_list_host.add_child(tree)
+	var root := tree.create_item()
+	squad.sort_custom(func(a, b):
+		var pa := PlayerTypes.POSITIONS.find(str(a.get("position", "")))
+		var pb := PlayerTypes.POSITIONS.find(str(b.get("position", "")))
+		return pa < pb if pa != pb else int(a.get("current_ability", 0)) > int(b.get("current_ability", 0))
+	)
+	var clubs := GameSession._collect_session_clubs()
+	for player in squad:
+		var item := tree.create_item(root)
+		var pid := int(player["id"])
+		item.set_metadata(0, pid)
+		var withdrawn: bool = pid in team.get("withdrawn_ids", [])
+		var state: Dictionary = (team.get("discipline", {}) as Dictionary).get(pid, {})
+		var status := "Выбыл: травма" if withdrawn else "Травмирован" if PlayerCondition.is_injured(player) else "Дисквалификация" if int(state.get("suspension_matches", 0)) > 0 else "Готов"
+		var values := [str(player.get("position", "")), str(player.get("name", "")), str((clubs.get(int(player.get("club_id", 0)), {}) as Dictionary).get("name", "Свободный агент")), str(player.get("age", 0)), str(player.get("current_ability", 0)), status]
+		for i in values.size():
+			item.set_text(i, values[i])
+			item.set_custom_color(i, WeTokens.TEXT_DIM if withdrawn else WeTokens.TEXT)
+	tree.item_activated.connect(func():
+		var item := tree.get_selected()
+		if item != null:
+			player_requested.emit(int(item.get_metadata(0)))
+	)
 
 
 func _build_side() -> void:
 	_clear_host(_side_host)
+	_side_host.add_child(_build_rating_card())
 	_side_host.add_child(_build_clubs_card())
 	_side_host.add_child(_build_coach_card())
 	_side_host.add_child(_build_history_card())
@@ -255,6 +305,8 @@ func _collect_country_clubs() -> Array:
 		return items
 
 	for unit in GameSession.units:
+		if NationalTeams.is_unit(unit):
+			continue
 		var clubs: Dictionary = unit.get("clubs_by_id", {})
 		for club_id in clubs.keys():
 			var id: int = int(club_id)
@@ -292,12 +344,16 @@ func _build_coach_card() -> PanelContainer:
 	box.add_theme_constant_override("separation", 4)
 	card.add_child(box)
 	box.add_child(_section_title("Главный тренер"))
-	var name_label := Label.new()
-	name_label.text = "Не назначен"
-	name_label.add_theme_color_override("font_color", WeTokens.TEXT)
-	name_label.add_theme_font_size_override("font_size", 13)
-	box.add_child(name_label)
-	box.add_child(_hint("Профиль появится позже"))
+	var coach: Dictionary = (GameSession.national_teams.get(_country_id, {}) as Dictionary).get("coach", {})
+	if coach.is_empty():
+		box.add_child(_hint("Не назначен"))
+		return card
+	var button := Button.new()
+	button.text = str(coach.get("name", ""))
+	button.pressed.connect(func(): coach_requested.emit(int(coach["id"])))
+	box.add_child(button)
+	box.add_child(_hint("Профессионализм %d/20 · Контракт %d г." % [CoachTypes.professionalism_of(coach), int(coach.get("contract_years", 0))]))
+	box.add_child(_hint("%s · %s" % [TacticTypes.style_label(CoachTypes.primary_style_of(coach)), CoachTypes.primary_formation_of(coach)]))
 	return card
 
 
@@ -307,7 +363,16 @@ func _build_history_card() -> PanelContainer:
 	box.add_theme_constant_override("separation", 4)
 	card.add_child(box)
 	box.add_child(_section_title("История"))
-	box.add_child(_hint("Пока нет призовых мест"))
+	var found := false
+	for unit in GameSession.units:
+		if not NationalTeams.is_unit(unit):
+			continue
+		for result in unit.get("winners", []):
+			if int(result.get("club_id", 0)) == NationalTeams.team_id(_country_id):
+				found = true
+				box.add_child(_hint("Сезон %d · %s · Победитель" % [int(result.get("season", 0)), str(unit.get("label", ""))]))
+	if not found:
+		box.add_child(_hint("Пока нет побед в международных турнирах"))
 	return card
 
 
@@ -373,3 +438,24 @@ func _clear_host(host: Node) -> void:
 	for child in host.get_children():
 		host.remove_child(child)
 		child.queue_free()
+
+
+func _build_rating_card() -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", WeTokens.panel(WeTokens.INSET, WeTokens.BORDER, WeTokens.RADIUS_MD, 12))
+	var box := VBoxContainer.new()
+	panel.add_child(box)
+	var team: Dictionary = GameSession.national_teams.get(_country_id, {})
+	var rating: Dictionary = team.get("rating", {})
+	box.add_child(_hint("Рейтинг Elo · с сезона %d · матчей %d" % [int(rating.get("since_season", 1)), int(rating.get("games", 0))]))
+	box.add_child(_hint("Талант: %d · стартовый: %d · тенденция: %+.2f" % [int(_country.get("youth_talent", 50)), int(_country.get("initial_youth_talent", _country.get("youth_talent", 50))), float(rating.get("trend", 0.0))]))
+	var current_talent := int(_country.get("youth_talent", 50))
+	box.add_child(_hint("Следующий рост: +%.2f · спад: −%.2f очков тенденции" % [5.0 + 0.04 * current_talent, 5.0 + 0.04 * (100 - current_talent)]))
+	var changes: Array = rating.get("talent_history", [])
+	for change in changes.slice(maxi(0, changes.size() - 5)):
+		box.add_child(_hint("Сезон %d: %d → %d · %s" % [int(change.season), int(change.before), int(change.after), str(change.reason)]))
+	var history: Array = rating.get("history", [])
+	for entry in history.slice(maxi(0, history.size() - 5)):
+		var opponent: Dictionary = GameSession.get_club_identity(int(entry.opponent_id))
+		box.add_child(_hint("С%d · %s · %+.1f → %.1f" % [int(entry.season), str(opponent.get("name", "Соперник")), float(entry.delta), float(entry.elo)]))
+	return panel

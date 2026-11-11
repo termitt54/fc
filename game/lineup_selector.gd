@@ -1,6 +1,6 @@
 class_name LineupSelector
 extends RefCounted
-## Picks the matchday 18, the starting GK+7 for a formation and the bench.
+## Picks the matchday 20, the starting GK+7 for a formation and the bench.
 ## Availability (injuries, bans) wins over ability; condition and morale bias the choice.
 
 
@@ -9,33 +9,28 @@ const MatchSimConfigScript := preload("res://game/match_simulation_config.gd")
 const TacticTypesScript := preload("res://game/tactic_types.gd")
 const PlayerConditionScript := preload("res://game/player_condition.gd")
 
-## Weights sum to one; general ability remains relevant in every role.
+## Weights sum to one; only role-specific skills determine footballing suitability.
 const ROLE_WEIGHTS := {
-	"GK": {"gk_stop": 0.65, "gk_aerial": 0.20, "gk_one_on_one": 0.15},
-	"CB": {"defend": 0.65, "aerial": 0.20, "poise": 0.15},
-	"FB": {"defend": 0.45, "press": 0.20, "pace": 0.20, "create": 0.15},
-	"CM": {"create": 0.60, "poise": 0.20, "defend": 0.20},
-	"WM": {"create": 0.35, "dribble": 0.25, "pace": 0.20, "press": 0.20},
-	"WF": {"dribble": 0.35, "off_ball": 0.25, "finish": 0.25, "pace": 0.15},
-	"ST": {"finish": 0.60, "off_ball": 0.25, "aerial": 0.15},
+	"GK":{"gk_stop":0.65,"gk_aerial":0.20,"gk_one_on_one":0.15},
+	"CB":{"defend":0.60,"aerial":0.20,"create":0.20},
+	"CM":{"create":0.50,"poise":0.20,"defend":0.15,"finish":0.15},
+	"ST":{"finish":0.55,"off_ball":0.20,"dribble":0.15,"aerial":0.10},
 }
-const STYLE_WEIGHTS := {
-	"control": {"create": 0.60, "poise": 0.25, "dribble": 0.15},
-	"tiki_taka": {"create": 0.65, "dribble": 0.20, "poise": 0.15},
-	"pressing": {"press": 0.45, "endurance": 0.35, "defend": 0.20},
-	"vertical": {"pace": 0.35, "create": 0.35, "off_ball": 0.30},
-	"kick_rush": {"aerial": 0.45, "pace": 0.30, "off_ball": 0.25},
-	"park_bus": {"defend": 0.55, "poise": 0.25, "endurance": 0.20},
-	"counter": {"pace": 0.40, "off_ball": 0.35, "create": 0.25},
-}
+const STYLE_WEIGHTS := {"attacking":{},"defensive":{}}
 
 ## Unmodified by condition/fit so the same role value can be used for substitutes.
 static func role_value(ratings: Dictionary, slot: String, style: String) -> float:
-	var role := _role_rating(ratings, slot)
-	if slot == "GK":
-		return 100.0 * (0.35 * float(ratings.get("ability", 0.5)) + 0.65 * role)
-	var style_value := _style_rating(ratings, style)
-	return 100.0 * (0.35 * float(ratings.get("ability", 0.5)) + 0.45 * role + 0.20 * style_value)
+	if not ratings.has("_selection_values"):
+		ratings["_selection_values"] = {}
+	var styles: Dictionary = ratings["_selection_values"]
+	if not styles.has(style):
+		styles[style] = {}
+	var values: Dictionary = styles[style]
+	if values.has(slot):
+		return float(values[slot])
+	var value := 100.0 * _role_rating(ratings,slot)
+	values[slot] = value
+	return value
 
 ## Lives inside MatchRatings' existing cache, invalidated and stripped with it.
 static func _role_rating(ratings: Dictionary, slot: String) -> float:
@@ -51,7 +46,7 @@ static func _style_rating(ratings: Dictionary, style: String) -> float:
 		ratings["_selection_styles"] = {}
 	var values: Dictionary = ratings["_selection_styles"]
 	if not values.has(style):
-		values[style] = _weighted_rating(ratings, STYLE_WEIGHTS.get(style, STYLE_WEIGHTS["control"]))
+		values[style] = _weighted_rating(ratings, STYLE_WEIGHTS.get(style, STYLE_WEIGHTS["attacking"]))
 	return float(values[style])
 
 static func _weighted_rating(ratings: Dictionary, weights: Dictionary) -> float:
@@ -69,6 +64,9 @@ static func build(
 	rng: RandomNumberGenerator,
 	include_bench: bool = true
 ) -> Dictionary:
+	var native: Variant = NativeSimulation.core()
+	if native != null:
+		return native.build_lineup(squad,youth,coach,plan,rng,include_bench)
 	var formation := str(plan.get("formation", TacticTypesScript.FORM_232))
 	if not TacticTypesScript.is_formation(formation):
 		formation = TacticTypesScript.FORM_232
@@ -76,15 +74,40 @@ static func build(
 
 	var pool := _available_pool(squad)
 	var used_youth := 0
-	if pool.size() < slots.size():
+	var keepers := 0
+	for player in pool:
+		if PlayerTypes.normalize_position(str(player.get("position", ""))) == PlayerTypes.POS_GK:
+			keepers += 1
+			if keepers >= 2:
+				break
+	if pool.size() < slots.size() or keepers < 2:
+		var selected_ids := {}
+		for player in pool:
+			selected_ids[int(player.get("id", 0))] = true
 		var reserves := _available_pool(youth)
 		reserves.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-			return float(MatchRatings.of(a).get("ability", 0.0)) > float(MatchRatings.of(b).get("ability", 0.0))
+			return role_value(MatchRatings.of(a), str(a.get("position", "CM")), "attacking") > role_value(MatchRatings.of(b), str(b.get("position", "CM")), "attacking")
 		)
+		# A full outfield pool is not a reason to play without a goalkeeper.
+		# Cover the start and one emergency reserve; national squads supply no youth.
+		for player in reserves:
+			if keepers >= 2:
+				break
+			var id := int(player.get("id", 0))
+			if selected_ids.has(id) or PlayerTypes.normalize_position(str(player.get("position", ""))) != PlayerTypes.POS_GK:
+				continue
+			pool.append(player)
+			selected_ids[id] = true
+			keepers += 1
+			used_youth += 1
 		for player in reserves:
 			if pool.size() >= slots.size():
 				break
+			var id := int(player.get("id", 0))
+			if selected_ids.has(id):
+				continue
 			pool.append(player)
+			selected_ids[id] = true
 			used_youth += 1
 
 	var noise := _decision_noise(coach)
@@ -95,45 +118,31 @@ static func build(
 	var positions: PackedStringArray = rated["positions"]
 	var scores: Dictionary = rated["scores"]
 	var count := pool.size()
+	var outfield_count := 0
+	for position in positions: outfield_count+=int(position!="GK")
 	var taken := []
 	taken.resize(count)
 	taken.fill(false)
-
+	var weights: Array = []
+	for slot in slots:
+		var row := PackedFloat64Array()
+		for j in maxi(count,slots.size()):
+			var value := 0.0
+			if j<count:
+				value=maxf(0.0001,float(scores[slot][j])*MatchTypesScript.slot_fit(str(slot),positions[j]))
+				if str(slot)!="GK" and positions[j]=="GK" and outfield_count>=slots.size()-1: value=-1000000
+				elif noise>0: value*=1.0+rng.randf_range(-noise,noise)
+			elif str(slot)=="GK" and count>0: value=-1000000
+			row.append(value)
+		weights.append(row)
+	var assignment: PackedInt32Array=load("res://game/lineup_assignment.gd").solve(weights)
 	var starters: Array = []
-	for slot_index in _slot_order(slots, positions):
-		var slot := str(slots[slot_index])
-		# Only a handful of distinct positions per slot, so fits are reused.
-		var fit_by_position: Dictionary = {}
-		var best := -1
-		var best_score := -1.0
-		var best_fit := 0.0
-		for i in count:
-			if taken[i]:
-				continue
-			var position := positions[i]
-			var fit: float = fit_by_position.get(position, -1.0)
-			if fit < 0.0:
-				fit = MatchTypesScript.slot_fit(slot, position)
-				fit_by_position[position] = fit
-			# Keep goalkeepers out of field roles while an outfielder is available.
-			if slot != "GK" and position == "GK" and _has_outfielder(positions, taken):
-				continue
-			var score := float(scores[slot][i]) * fit
-			if noise > 0.0:
-				score *= 1.0 + rng.randf_range(-noise, noise)
-			if score > best_score:
-				best_score = score
-				best = i
-				best_fit = fit
-		if best < 0:
-			continue
-		taken[best] = true
-		starters.append({
-			"player": pool[best],
-			"slot": slot,
-			"fit": best_fit,
-			"selection_score": best_score,
-		})
+	for row in slots.size():
+		var selected: int=assignment[row]
+		if selected<0 or selected>=count: continue
+		taken[selected]=true
+		starters.append({"player":pool[selected],"slot":str(slots[row]),
+			"fit":MatchTypesScript.slot_fit(str(slots[row]),positions[selected]),"selection_score":float(weights[row][selected])})
 
 	var lineup := {
 		"formation": formation, "style": style, "starters": starters, "bench": [],
@@ -169,11 +178,11 @@ static func _build_bench(pool: Array, positions: PackedStringArray, taken: Array
 	var rest: Array = []
 	var rest_scores: Dictionary = {}
 	for i in count:
-		if taken[i] or positions[i] == "GK":
+		if taken[i]:
 			continue
 		var best_score := 0.0
 		for slot in scores:
-			if slot != "GK":
+			if (slot == "GK") == (positions[i] == "GK"):
 				best_score = maxf(best_score, float(scores[slot][i]) * MatchTypesScript.slot_fit(slot, positions[i]))
 		rest.append(i)
 		rest_scores[i] = best_score
@@ -209,20 +218,30 @@ static func _available_pool(players: Array) -> Array:
 static func _rate_pool(pool: Array, slots: Array, style: String) -> Dictionary:
 	var positions := PackedStringArray()
 	var scores: Dictionary = {}
+	# Keep the original unique-slot insertion order and float32 rounding.
 	for slot in slots:
-		scores[slot] = PackedFloat32Array()
+		scores[slot] = null
+	var prepared: Array = []
 	for player in pool:
 		var ratings := MatchRatings.of(player)
 		var select := MatchSimConfigScript.condition_select_mult(PlayerConditionScript.condition_of(player))
 		var morale := 0.94 + 0.12 * (float(PlayerConditionScript.morale_of(player)) / float(MatchTypesScript.MORALE_MAX))
 		positions.append(str(ratings.get("position", PlayerTypes.POS_CM)))
-		var common := 0.35 * float(ratings.get("ability", 0.5)) + 0.20 * _style_rating(ratings, style)
-		for slot in scores:
-			var values: PackedFloat32Array = scores[slot]
-			var value := role_value(ratings, slot, style) if slot == "GK" else \
-				100.0 * (common + 0.45 * _role_rating(ratings, slot))
-			values.append(value * select * morale)
-			scores[slot] = values
+		var common := (4.0/13.0) * _style_rating(ratings, style)
+		prepared.append([ratings,select,morale,common,
+			float(player.get("_national_form_bonus", 0.0)) if bool(player.get("_national_selection", false)) else 0.0,
+			bool(player.get("_national_selection", false))])
+	# Append outside the dictionary: PackedFloat32Array is copy-on-write.
+	# Fetching it from scores for every player copied the growing array repeatedly.
+	for slot in scores:
+		var values := PackedFloat32Array()
+		for row in prepared:
+			var ratings: Dictionary = row[0]
+			var value := role_value(ratings, slot, style)
+			if bool(row[5]):
+				value += float(row[4])
+			values.append(value * float(row[1]) * float(row[2]))
+		scores[slot] = values
 	return {"positions": positions, "scores": scores}
 
 static func _has_outfielder(positions: PackedStringArray, taken: Array) -> bool:
@@ -265,6 +284,8 @@ static func _slot_order(slots: Array, positions: PackedStringArray) -> Array:
 	return order
 
 
-static func _decision_noise(_coach: Dictionary) -> float:
+static func _decision_noise(coach: Dictionary) -> float:
+	if bool(coach.get("national_selection", false)):
+		return CoachTypes.selection_uncertainty(coach) * 0.20
 	return 0.0
 

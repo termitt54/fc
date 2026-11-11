@@ -1,0 +1,22 @@
+{
+  "status": "verified",
+  "installed_at_local": "2026-10-16T03:43:31",
+  "files": [
+    {
+      "file": "C:\\Users\\79776\\AppData\\Roaming\\Godot\\app_userdata\\Новый игровой проект\\config\\match_simulation.json",
+      "version": 5,
+      "sha256": "299b65fb0ab919af02e8c19c4049f66cd1243d2ffed20802af0ea4a58da80247",
+      "backup": "C:\\Users\\79776\\AppData\\Roaming\\Godot\\app_userdata\\Новый игровой проект\\config\\match_simulation.before-football-v6-20261016-033623.json",
+      "before_sha256": "E851742065BC9972119A7E0F717F9760B51C6956543182F2F43E7837BFFD753D"
+    },
+    {
+      "file": "C:\\Users\\79776\\AppData\\Roaming\\Godot\\app_userdata\\Новый игровой проект\\config\\youth_talent_birth.json",
+      "version": 6,
+      "sha256": "f27f385f51a862fe751cbd963c5866789a4e73aa818fd50cf5ce9aa2101c8ef0",
+      "backup": "C:\\Users\\79776\\AppData\\Roaming\\Godot\\app_userdata\\Новый игровой проект\\config\\youth_talent_birth.before-football-v6-20261016-033623.json",
+      "before_sha256": "BA88D5E4ECB93D2E7F6101570E1132D7EFD6B7A0B03AF83AA7D6AFF0F8223D35"
+    }
+  ],
+  "protected_databases_unchanged": true,
+  "runtime_load_verified": true
+}

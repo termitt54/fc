@@ -7,6 +7,7 @@ const PlayerTypesScript := preload("res://game/player_types.gd")
 const PlayerGeneratorScript := preload("res://game/player_generator.gd")
 const CoachTypesScript := preload("res://game/coach_types.gd")
 const PlayerMarketScript := preload("res://game/player_market.gd")
+const Offer := preload("res://game/player_offer.gd")
 
 const REASON_RENEWED := "renewed"
 const REASON_RELEASED := "released"
@@ -20,10 +21,16 @@ static func tick_years(entity: Dictionary) -> int:
 	return years
 
 
-static func stay_chance(player: Dictionary, club: Dictionary, coach: Dictionary) -> float:
-	var club_rep := float(clampi(int(club.get("reputation", 500)), 0, 1000))
+static func stay_chance(player: Dictionary, club: Dictionary, coach: Dictionary, context: Dictionary = {}) -> float:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return native.contract_chance(player,club,CoachTypesScript.negotiations_of(coach),context)
+	var club_rep := Offer.Attraction.value(club)
 	var player_rep := float(clampi(int(player.get("reputation", 0)), 0, 1000))
 	var gap := player_rep - club_rep
+	var willingness := Offer.evaluate(player, club, coach, {"renewal": true, "offer_wage": renewal_wage(player, context), "world_top_reputation": int(context.get("world_top_reputation", 0))})
+	if not bool(willingness["accepted"]):
+		return 0.0
 	var chance := 0.62 - clampf(gap / 400.0, -0.25, 0.45)
 	var characters: Array = PlayerTypesScript.characters_of(player)
 	if PlayerTypesScript.CHAR_LOYAL in characters:
@@ -37,7 +44,9 @@ static func stay_chance(player: Dictionary, club: Dictionary, coach: Dictionary)
 			chance -= 0.12
 	var talks := float(CoachTypesScript.negotiations_of(coach))
 	chance += (talks - 10.0) * 0.025
-	return clampf(chance, 0.08, 0.94)
+	if bool(context.get("key_player", false)):
+		chance += 0.15
+	return clampf(chance, 0.08, 0.97)
 
 
 static func roll_new_years(rng: RandomNumberGenerator, player: Dictionary) -> int:
@@ -52,7 +61,8 @@ static func process_player(
 	player: Dictionary,
 	club: Dictionary,
 	coach: Dictionary,
-	rng: RandomNumberGenerator
+	rng: RandomNumberGenerator,
+	context: Dictionary = {}
 ) -> String:
 	if bool(player.get("is_youth", false)):
 		tick_years(player)
@@ -62,19 +72,31 @@ static func process_player(
 		return REASON_YOUTH_KEPT if int(player.get("contract_years", 0)) > 0 else REASON_RELEASED
 
 	var years := tick_years(player)
-	if years > 0:
+	var early := years == 1 and bool(context.get("key_player", false))
+	if years > 0 and not early:
 		return REASON_ACTIVE
-	if _wants_to_stay(player, club, coach, rng.randf()):
-		player["contract_years"] = maxi(1, roll_new_years(rng, player))
+	var offered_wage := renewal_wage(player, context)
+	if _wants_to_stay(player, club, coach, rng.randf(), context):
+		player["contract_years"] = maxi(2 if early else 1, roll_new_years(rng, player))
 		player["contract_status"] = "club"
 		# A fresh deal is signed at today's price, not the one he joined on.
 		PlayerMarketScript.reprice_contract(player)
+		player["wage"] = offered_wage
 		return REASON_RENEWED
+	if early:
+		return REASON_ACTIVE
 	player["contract_years"] = 0
 	player["contract_status"] = "free_agent"
 	player["club_id"] = 0
 	return REASON_RELEASED
 
 
-static func _wants_to_stay(player: Dictionary, club: Dictionary, coach: Dictionary, roll: float) -> bool:
-	return roll <= stay_chance(player, club, coach)
+static func _wants_to_stay(player: Dictionary, club: Dictionary, coach: Dictionary, roll: float, context: Dictionary = {}) -> bool:
+	var chance := stay_chance(player, club, coach, context)
+	return chance > 0.0 and roll < chance
+
+
+static func renewal_wage(player: Dictionary, context: Dictionary = {}) -> int:
+	var expected := PlayerMarketScript.expected_wage_of(player)
+	var retained := int(ceil(float(player.get("wage", 0)) * (1.10 if bool(context.get("key_player", false)) else 1.0)))
+	return maxi(expected, retained)

@@ -12,8 +12,6 @@ const CLUB_LOGO_SIZE := 18
 const CHIP_HEIGHT := 42
 const PERSONALITY_MAX := 20
 const ATTR_MAX := 20
-const STAT_LABEL_WIDTH := 108.0
-const STAT_BAR_WIDTH := 48.0
 const CAREER_LOGO_SIZE := 18
 const CAREER_COL_SEASON := 36.0
 const CAREER_COL_APPS := 64.0
@@ -98,7 +96,9 @@ func _style_close_button() -> void:
 
 func open_for(player_id: int) -> void:
 	_player_id = player_id
-	_player = GameSession.get_player(player_id)
+	_player = GameSession.get_player_profile(player_id)
+	if not _player.is_empty():
+		PlayerTypes.migrate_compact(_player)
 	_rebuild()
 	visible = true
 
@@ -106,7 +106,9 @@ func open_for(player_id: int) -> void:
 func refresh() -> void:
 	if not visible or _player_id < 1:
 		return
-	_player = GameSession.get_player(_player_id)
+	_player = GameSession.get_player_profile(_player_id)
+	if not _player.is_empty():
+		PlayerTypes.migrate_compact(_player)
 	_rebuild()
 
 
@@ -142,7 +144,9 @@ func _rebuild() -> void:
 	_build_header_facts()
 	_clear_host(_body_host)
 	if _player.is_empty():
-		_body_host.add_child(_hint("Игрок не найден"))
+		var missing := _hint("Игрок не найден")
+		missing.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		_body_host.add_child(missing)
 		return
 
 	var grid := _build_body_grid()
@@ -175,6 +179,10 @@ func _build_meta_row() -> void:
 	if _player.is_empty():
 		return
 
+	if bool(_player.get("is_retired", false)):
+		_meta_host.add_child(_meta_text("Завершил карьеру · сезон %d" % int(_player.get("retired_season", 0))))
+		_meta_host.add_child(_meta_dot())
+
 	var age := int(_player.get("age", 0))
 	if age > 0:
 		_meta_host.add_child(_meta_text("%d %s" % [age, _years_word(age)]))
@@ -204,6 +212,9 @@ func _build_header_facts() -> void:
 	_clear_host(_facts_host)
 	_facts_host.visible = not _player.is_empty()
 	if _player.is_empty():
+		return
+	if bool(_player.get("is_retired", false)):
+		_facts_host.add_child(_fact_chip("Карьера", "Завершена · сезон %d" % int(_player.get("retired_season", 0))))
 		return
 
 	var years := int(_player.get("contract_years", 0))
@@ -357,13 +368,7 @@ func _club_link(club_id: int, club_name: String, logo_path: String) -> Control:
 
 
 func _resolve_club(club_id: int) -> Dictionary:
-	if club_id < 1:
-		return {}
-	for unit in GameSession.units:
-		var clubs: Dictionary = unit.get("clubs_by_id", {})
-		if clubs.has(club_id):
-			return clubs[club_id]
-	return {}
+	return GameSession.get_club_identity(club_id)
 
 
 func _make_flag(path: String) -> Control:
@@ -485,6 +490,7 @@ func _placeholder_body(text: String) -> Control:
 	wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	wrap.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	var label := _hint(text)
+	label.custom_minimum_size = Vector2(160, 40)
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	label.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	wrap.add_child(label)
@@ -502,12 +508,19 @@ func _build_statistics_content() -> Control:
 		GameSession.get_player_transfers(_player_id),
 		_player_id
 	)
-	if int(totals.get("matches", 0)) < 1 and rows.is_empty():
+	if int(totals.get("matches", 0)) < 1 and rows.is_empty() and (_player.get("national_stats", []) as Array).is_empty():
 		root.add_child(_hint("Матчей ещё не было"))
 		return root
 
 	root.add_child(_career_summary(totals))
 	root.add_child(_career_history(rows))
+	var national_rows: Array = _player.get("national_stats", []).duplicate()
+	if not national_rows.is_empty():
+		var heading := Label.new()
+		heading.text = "Национальная сборная · Статистика по сезонам"
+		root.add_child(heading)
+		national_rows.reverse()
+		root.add_child(_career_history(national_rows))
 	return root
 
 
@@ -847,69 +860,86 @@ func _is_keeper() -> bool:
 func _build_characteristics_content() -> Control:
 	var root := VBoxContainer.new()
 	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	root.add_theme_constant_override("separation", 10)
-
-	root.add_child(_build_attributes_block())
-	root.add_child(_build_character_strip())
-	root.add_child(_build_personality_scales_block())
+	root.add_theme_constant_override("separation", 8)
+	var reserve_delta := _shows_attribute_deltas()
+	var note := ""
+	if reserve_delta:
+		note = "изменения к сезону %d" % _latest_development_season()
+	root.add_child(_build_character_strip(note))
+	root.add_child(_build_attributes_block(reserve_delta))
 	return root
 
 
-func _build_character_strip() -> Control:
-	var wrap := VBoxContainer.new()
-	wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	wrap.add_theme_constant_override("separation", 4)
+func _shows_attribute_deltas() -> bool:
+	return _player.has("development_deltas") and _latest_development_season() > 0
 
-	var title := Label.new()
-	title.text = "Характер"
-	title.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
-	title.add_theme_font_size_override("font_size", 11)
-	wrap.add_child(title)
 
+func _build_character_strip(note: String) -> Control:
 	var characters: Array = PlayerTypes.characters_of(_player)
 	if characters.is_empty():
-		wrap.add_child(_hint("Нет данных"))
-		return wrap
+		return _hint("Нет данных о характере")
 
-	var row := HBoxContainer.new()
-	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_theme_constant_override("separation", 8)
-	wrap.add_child(row)
-
-	for code in characters:
-		row.add_child(_character_chip(str(code)))
+	var wrap := VBoxContainer.new()
+	wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wrap.add_theme_constant_override("separation", 8)
+	for i in characters.size():
+		wrap.add_child(_character_chip(str(characters[i]), note if i == 0 else ""))
 	return wrap
 
 
-func _character_chip(code: String) -> Control:
+func _character_chip(code: String, note: String) -> Control:
+	var effect_text := PlayerTypes.character_effect(code)
 	var chip := PanelContainer.new()
 	chip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	chip.tooltip_text = PlayerTypes.character_effect(code)
+	chip.tooltip_text = effect_text
+	var border := WeTokens.ACCENT
+	border.a = 0.35
 	chip.add_theme_stylebox_override(
 		"panel",
-		WeTokens.panel(WeTokens.SURFACE_RAISED, WeTokens.BORDER, WeTokens.RADIUS_SM, 8)
+		WeTokens.panel(WeTokens.SURFACE_RAISED, border, WeTokens.RADIUS_SM, 8)
 	)
 
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 2)
 	chip.add_child(box)
 
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 8)
+	box.add_child(head)
+
+	var kicker := Label.new()
+	kicker.text = "Характер"
+	kicker.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	kicker.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
+	kicker.add_theme_font_size_override("font_size", 11)
+	head.add_child(kicker)
+
 	var name_label := Label.new()
 	name_label.text = PlayerTypes.character_label(code)
+	name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_label.clip_text = true
+	name_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	name_label.add_theme_color_override("font_color", WeTokens.ACCENT)
-	name_label.add_theme_font_size_override("font_size", 13)
+	name_label.add_theme_font_size_override("font_size", 15)
 	if _title_font != null:
 		name_label.add_theme_font_override("font", _title_font)
-	box.add_child(name_label)
+	head.add_child(name_label)
 
-	var effect := Label.new()
-	effect.text = PlayerTypes.character_effect(code)
-	effect.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	effect.max_lines_visible = 2
-	effect.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	effect.add_theme_color_override("font_color", WeTokens.TEXT_MUTED)
-	effect.add_theme_font_size_override("font_size", 11)
-	box.add_child(effect)
+	if not note.is_empty():
+		var note_label := Label.new()
+		note_label.text = note
+		note_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		note_label.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
+		note_label.add_theme_font_size_override("font_size", 11)
+		head.add_child(note_label)
+
+	if not effect_text.is_empty():
+		var effect := Label.new()
+		effect.text = effect_text
+		effect.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		effect.add_theme_color_override("font_color", WeTokens.TEXT_MUTED)
+		effect.add_theme_font_size_override("font_size", 12)
+		box.add_child(effect)
 	return chip
 
 
@@ -958,172 +988,223 @@ func _attribute_delta(group: String, key: String) -> int:
 	return int((group_data as Dictionary).get(key, 0))
 
 
-func _build_attributes_block() -> Control:
+func _build_attributes_block(reserve_delta: bool) -> Control:
 	var box := VBoxContainer.new()
 	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	box.add_theme_constant_override("separation", 4)
-
-	var header := HBoxContainer.new()
-	header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	box.add_child(header)
-
-	var title := Label.new()
-	title.text = "Атрибуты"
-	title.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
-	title.add_theme_font_size_override("font_size", 11)
-	header.add_child(title)
-
-	if _player.has("development_deltas") and _latest_development_season() > 0:
-		var spacer := Control.new()
-		spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		header.add_child(spacer)
-		var note := Label.new()
-		note.text = "к сезону %d" % _latest_development_season()
-		note.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
-		note.add_theme_font_size_override("font_size", 11)
-		header.add_child(note)
+	box.add_theme_constant_override("separation", 8)
 
 	var attributes: Dictionary = _player.get("attributes", {})
 	if attributes.is_empty():
 		box.add_child(_hint("Атрибуты отсутствуют — начните новую игру"))
 		return box
 
-	var position := str(_player.get("position", ""))
-	var groups: Array = PlayerTypes.attribute_groups_for_position(position)
-
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	grid.add_theme_constant_override("h_separation", 16)
-	grid.add_theme_constant_override("v_separation", 10)
-	box.add_child(grid)
-
-	for group in groups:
-		var group_data: Variant = attributes.get(group, {})
-		if typeof(group_data) != TYPE_DICTIONARY:
-			continue
-		grid.add_child(_attribute_group_panel(str(group), group_data))
+	var rows: Array = [
+		[PlayerTypes.ATTR_GROUP_TECHNICAL, PlayerTypes.ATTR_GROUP_PHYSICAL],
+		[PlayerTypes.ATTR_GROUP_SET_PIECES],
+	]
+	if _is_keeper():
+		rows = [
+			[PlayerTypes.ATTR_GROUP_TECHNICAL, PlayerTypes.ATTR_GROUP_GOALKEEPING],
+			[PlayerTypes.ATTR_GROUP_PHYSICAL, PlayerTypes.ATTR_GROUP_SET_PIECES],
+		]
+	box.add_child(_attribute_columns(rows, attributes, reserve_delta))
 	return box
 
 
-func _attribute_group_panel(group: String, group_data: Dictionary) -> Control:
+func _attribute_columns(rows: Array, attributes: Dictionary, reserve_delta: bool) -> Control:
+	var stack := VBoxContainer.new()
+	stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	stack.add_theme_constant_override("separation", 8)
+	for pair in rows:
+		var row := HBoxContainer.new()
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_theme_constant_override("separation", 8)
+		var present: Array[String] = []
+		for group in pair:
+			var group_data: Variant = attributes.get(group, null)
+			if typeof(group_data) == TYPE_DICTIONARY and attributes.has(group):
+				present.append(str(group))
+		if present.is_empty():
+			continue
+		var wide := present.size() == 1
+		for group in present:
+			row.add_child(_attribute_group_panel(
+				group,
+				attributes.get(group, {}),
+				reserve_delta,
+				wide
+			))
+		stack.add_child(row)
+	return stack
+
+
+func _attribute_group_panel(
+	group: String,
+	group_data: Dictionary,
+	reserve_delta: bool,
+	wide: bool
+) -> Control:
+	var tint := _group_tint(group)
+	var border := tint
+	border.a = 0.42
 	var panel := PanelContainer.new()
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	panel.add_theme_stylebox_override(
-		"panel",
-		WeTokens.panel(Color(1, 1, 1, 0.03), WeTokens.BORDER, WeTokens.RADIUS_SM, 8)
-	)
+	panel.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	var style := WeTokens.panel(Color(1, 1, 1, 0.04), border, WeTokens.RADIUS_SM, 10)
+	style.border_width_left = 3
+	panel.add_theme_stylebox_override("panel", style)
 
 	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 2)
+	col.add_theme_constant_override("separation", 6)
 	panel.add_child(col)
 
 	var title := Label.new()
 	title.text = PlayerTypes.attr_group_label(group)
-	title.add_theme_color_override("font_color", WeTokens.ACCENT)
+	title.add_theme_color_override("font_color", tint)
 	title.add_theme_font_size_override("font_size", 12)
 	if _title_font != null:
 		title.add_theme_font_override("font", _title_font)
 	col.add_child(title)
 
-	for key in PlayerTypes.attribute_keys_for_group(group):
+	var keys: Array = PlayerTypes.attribute_keys_for_group(group)
+	var shown: Array[String] = []
+	var name_width := 64.0
+	for key in keys:
 		if not group_data.has(key):
 			continue
-		col.add_child(_stat_row(
-			PlayerTypes.attribute_label(key),
+		var label_text := PlayerTypes.attribute_label(str(key))
+		shown.append(label_text)
+		name_width = maxf(name_width, _text_width(label_text, 13) + 4.0)
+
+	var side_by_side := wide and shown.size() > 1 and shown.size() <= 3
+	var list: BoxContainer = HBoxContainer.new() if side_by_side else VBoxContainer.new()
+	list.add_theme_constant_override("separation", 18 if side_by_side else 5)
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_child(list)
+	var index := 0
+	for key in keys:
+		if not group_data.has(key):
+			continue
+		var label_text := shown[index]
+		index += 1
+		var meter := _attribute_meter(
+			label_text,
 			int(group_data.get(key, 0)),
-			true,
-			_attribute_delta(group, str(key))
-		))
+			_attribute_delta(group, str(key)),
+			reserve_delta,
+			_text_width(label_text, 13) + 4.0 if side_by_side else name_width
+		)
+		if side_by_side:
+			meter.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		list.add_child(meter)
 	return panel
 
 
-func _build_personality_scales_block() -> Control:
-	var personality: Dictionary = _player.get("personality", {})
-	var wrap := VBoxContainer.new()
-	wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	wrap.add_theme_constant_override("separation", 4)
-	if personality.is_empty():
-		return wrap
-
-	var title := Label.new()
-	title.text = "Шкалы"
-	title.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
-	title.add_theme_font_size_override("font_size", 11)
-	wrap.add_child(title)
-
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	grid.add_theme_constant_override("h_separation", 16)
-	grid.add_theme_constant_override("v_separation", 2)
-	wrap.add_child(grid)
-
-	for key in PlayerTypes.PERSONALITY_KEYS:
-		grid.add_child(_stat_row(
-			PlayerTypes.personality_label(key),
-			int(personality.get(key, 0)),
-			false
-		))
-	return wrap
-
-
-func _stat_row(label_text: String, value: int, colorize: bool, delta: int = 0) -> Control:
+func _attribute_meter(
+	label_text: String,
+	value: int,
+	delta: int,
+	reserve_delta: bool,
+	name_width: float
+) -> Control:
+	var level := clampi(value, 0, ATTR_MAX)
+	var color := _attr_color(level)
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_theme_constant_override("separation", 6)
+	row.custom_minimum_size.y = 24
+	row.add_theme_constant_override("separation", 8)
+	row.tooltip_text = _attribute_tooltip(label_text, level, delta)
+	row.add_child(_attribute_score(level, color))
+	if reserve_delta:
+		row.add_child(_attribute_delta_label(delta))
 
-	var label := Label.new()
-	label.text = label_text
-	label.custom_minimum_size.x = STAT_LABEL_WIDTH
-	label.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
-	label.clip_text = true
-	label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	label.add_theme_color_override("font_color", WeTokens.TEXT_MUTED)
-	label.add_theme_font_size_override("font_size", 12)
-	row.add_child(label)
+	var name := Label.new()
+	name.text = label_text
+	name.custom_minimum_size.x = name_width
+	name.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	name.clip_text = true
+	name.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	name.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	name.add_theme_color_override("font_color", WeTokens.TEXT)
+	name.add_theme_font_size_override("font_size", 13)
+	row.add_child(name)
 
-	var level := clampi(value, 0, ATTR_MAX)
-	var fill_color := _attr_color(level) if colorize else WeTokens.ACCENT_DIM
+	var meter := AttributeMeter.new()
+	meter.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	meter.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	meter.set_level(level, color)
+	row.add_child(meter)
+	return row
 
-	var bar := ProgressBar.new()
-	bar.min_value = 0
-	bar.max_value = ATTR_MAX
-	bar.value = level
-	bar.show_percentage = false
-	bar.custom_minimum_size = Vector2(STAT_BAR_WIDTH, 5)
-	bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	bar.add_theme_stylebox_override("background", WeTokens.fill(Color(1, 1, 1, 0.06), 2))
-	bar.add_theme_stylebox_override("fill", WeTokens.fill(fill_color, 2))
-	row.add_child(bar)
+
+func _attribute_score(level: int, color: Color) -> Control:
+	var chip := PanelContainer.new()
+	chip.custom_minimum_size = Vector2(32, 22)
+	chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var bg := color
+	bg.a = 0.18
+	chip.add_theme_stylebox_override("panel", WeTokens.fill(bg, 6, 4, 1))
 
 	var value_label := Label.new()
 	value_label.text = str(level)
-	value_label.custom_minimum_size = Vector2(22, 0)
-	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	value_label.add_theme_color_override("font_color", fill_color if colorize else WeTokens.TEXT)
-	value_label.add_theme_font_size_override("font_size", 12)
+	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	value_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	value_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	value_label.add_theme_color_override("font_color", color)
+	value_label.add_theme_font_size_override("font_size", 14)
 	if _title_font != null:
 		value_label.add_theme_font_override("font", _title_font)
-	row.add_child(value_label)
+	chip.add_child(value_label)
+	return chip
 
-	if colorize:
-		var delta_label := Label.new()
-		delta_label.custom_minimum_size = Vector2(28, 0)
-		delta_label.add_theme_font_size_override("font_size", 11)
-		if _title_font != null:
-			delta_label.add_theme_font_override("font", _title_font)
-		if delta > 0:
-			delta_label.text = "+%d" % delta
-			delta_label.add_theme_color_override("font_color", WeTokens.SUCCESS)
-			delta_label.tooltip_text = "Прирост к сезону %d" % _latest_development_season()
-		elif delta < 0:
-			delta_label.text = str(delta)
-			delta_label.add_theme_color_override("font_color", WeTokens.DANGER)
-			delta_label.tooltip_text = "Спад к сезону %d" % _latest_development_season()
-		row.add_child(delta_label)
-	return row
+
+func _attribute_delta_label(delta: int) -> Control:
+	var label := Label.new()
+	label.custom_minimum_size = Vector2(26, 0)
+	label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.add_theme_font_size_override("font_size", 12)
+	if _title_font != null:
+		label.add_theme_font_override("font", _title_font)
+	if delta > 0:
+		label.text = "+%d" % delta
+		label.add_theme_color_override("font_color", WeTokens.SUCCESS)
+		label.tooltip_text = "Прирост к сезону %d" % _latest_development_season()
+	elif delta < 0:
+		label.text = str(delta)
+		label.add_theme_color_override("font_color", WeTokens.DANGER)
+		label.tooltip_text = "Спад к сезону %d" % _latest_development_season()
+	return label
+
+
+func _text_width(text: String, font_size: int) -> float:
+	var font := WeTokens.font()
+	if font == null:
+		return float(text.length()) * float(font_size) * 0.56
+	return font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+
+
+func _attribute_tooltip(label_text: String, level: int, delta: int) -> String:
+	var text := "%s · %d из %d" % [label_text, level, ATTR_MAX]
+	if delta > 0:
+		text += " · +%d к сезону %d" % [delta, _latest_development_season()]
+	elif delta < 0:
+		text += " · %d к сезону %d" % [delta, _latest_development_season()]
+	return text
+
+
+func _group_tint(group: String) -> Color:
+	match group:
+		PlayerTypes.ATTR_GROUP_PHYSICAL:
+			return Color(0.56, 0.78, 0.98, 1.0)
+		PlayerTypes.ATTR_GROUP_SET_PIECES:
+			return Color(0.95, 0.78, 0.46, 1.0)
+		PlayerTypes.ATTR_GROUP_GOALKEEPING:
+			return Color(0.64, 0.9, 0.8, 1.0)
+		_:
+			return WeTokens.ACCENT
 
 
 func _block_heading(text: String) -> Label:
@@ -1248,3 +1329,53 @@ func _clear_host(host: Node) -> void:
 	for child in host.get_children():
 		host.remove_child(child)
 		child.queue_free()
+
+
+class AttributeMeter extends Control:
+	const SEGMENTS := 20
+
+	var level: int = 0
+	var _fill_box: StyleBoxFlat
+	var _track_box: StyleBoxFlat
+
+
+	func _init() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		custom_minimum_size = Vector2(72, 10)
+		_fill_box = WeTokens.fill(Color.WHITE, 4)
+		_track_box = WeTokens.fill(Color(1, 1, 1, 0.08), 4)
+
+
+	func set_level(value: int, color: Color) -> void:
+		level = clampi(value, 0, SEGMENTS)
+		_fill_box.bg_color = color
+		var track := color
+		track.a = 0.16
+		_track_box.bg_color = track
+		queue_redraw()
+
+
+	func _draw() -> void:
+		var width := size.x
+		var height := size.y
+		if width < 4.0 or height < 1.0 or _fill_box == null or _track_box == null:
+			return
+		var radius := int(floor(height / 2.0))
+		_track_box.set_corner_radius_all(radius)
+		draw_style_box(_track_box, Rect2(0, 0, width, height))
+		var filled := width * float(level) / float(SEGMENTS)
+		if filled > 0.5:
+			var fill_radius := radius if filled >= height else int(floor(filled / 2.0))
+			_fill_box.set_corner_radius_all(fill_radius)
+			draw_style_box(_fill_box, Rect2(0, 0, filled, height))
+		if width < 120.0:
+			return
+		for i in range(1, SEGMENTS):
+			var x := width * float(i) / float(SEGMENTS)
+			var major := i % 5 == 0
+			var on_fill := float(i) <= float(level)
+			var tick := Color(0.03, 0.05, 0.07, 0.42 if major else 0.24)
+			if not on_fill:
+				tick = Color(1, 1, 1, 0.2 if major else 0.1)
+			var inset := 1.0 if major else 2.0
+			draw_line(Vector2(x, inset), Vector2(x, height - inset), tick, 1.0)

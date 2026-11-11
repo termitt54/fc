@@ -7,6 +7,7 @@ const Config := preload("res://game/youth_generation_config.gd")
 
 const MODE_YOUTH := "youth"
 const MODE_FIRST_TEAM := "first_team"
+const MODE_RESERVE := "reserve"
 
 
 static func generate_youth_intake(
@@ -82,6 +83,39 @@ static func plan_intake(
 		club_ids.sort()
 		var country: Dictionary = countries_by_id.get(country_id, {})
 		var talent := int(country.get("youth_talent", Config.YOUTH_TALENT_DEFAULT))
+		var positions_by_club := {}
+		var position_counts := {}
+		var total_slots := 0
+		for club_id in club_ids:
+			total_slots += int(club_slots[club_id])
+		var youth_positions: Array = []
+		if mode != MODE_FIRST_TEAM:
+			for i in total_slots:
+				var quantile := (float(i) + rng.randf()) / float(total_slots)
+				youth_positions.append("GK" if quantile<0.12 else "CB" if quantile<0.50 else "CM" if quantile<0.78 else "ST")
+			for i in range(youth_positions.size() - 1, 0, -1):
+				var j := rng.randi_range(0, i)
+				var value: Variant = youth_positions[i]
+				youth_positions[i] = youth_positions[j]
+				youth_positions[j] = value
+		var position_index := 0
+		for club_id in club_ids:
+			var positions := PlayerGenerator.build_position_list(rng) if mode == MODE_FIRST_TEAM else PackedStringArray()
+			if mode == MODE_FIRST_TEAM:
+				var slots := int(club_slots[club_id])
+				while positions.size() < slots:
+					positions.append(PlayerTypes.FIELD_POSITIONS[rng.randi_range(0, PlayerTypes.FIELD_POSITIONS.size()-1)])
+				positions.resize(slots)
+			if mode != MODE_FIRST_TEAM:
+				for i in int(club_slots[club_id]):
+					positions.append(str(youth_positions[position_index]))
+					position_index += 1
+			positions_by_club[club_id] = positions
+			for position in positions:
+				position_counts[position] = int(position_counts.get(position, 0)) + 1
+		var potentials := {}
+		for position in position_counts:
+			potentials[position] = Config.roll_birth_cohort(talent, int(position_counts[position]), rng)
 		for raw_club_id in club_ids:
 			var club_id := int(raw_club_id)
 			var slots := int(club_slots.get(club_id, 0))
@@ -89,11 +123,13 @@ static func plan_intake(
 				continue
 			var club: Dictionary = club_by_id[club_id]
 			for _n in slots:
-				var pa := Config.roll_birth_potential(talent, rng)
+				var position := str(positions_by_club[club_id][_n])
+				var pa := int((potentials[position] as Array).pop_back())
 				var age := _roll_age_for_mode(rng, pa, mode)
 				var academy := int(club.get("youth_academy", 10))
 				var ca := generate_youth_starting_ability(rng, pa, age, academy, mode)
 				assignments.append({
+					"position": position,
 					"potential_ability": pa,
 					"current_ability": ca,
 					"age": age,
@@ -150,7 +186,7 @@ static func realize_assignments(
 		var squad: Array = []
 		for i in rows.size():
 			var spec: Dictionary = rows[i]
-			var position := str(positions[i]) if i < positions.size() else PlayerGenerator.roll_youth_position(rng)
+			var position := str(spec.get("position", positions[i] if i < positions.size() else PlayerGenerator.roll_youth_position(rng)))
 			squad.append(PlayerGenerator.create_player(
 				int(club_id),
 				club,
@@ -294,6 +330,8 @@ static func _senior_readiness(rng: RandomNumberGenerator, age: int) -> float:
 static func _roll_age_for_mode(rng: RandomNumberGenerator, potential_ability: int, mode: String) -> int:
 	if mode == MODE_FIRST_TEAM:
 		return PlayerGenerator.roll_age(rng, potential_ability)
+	if mode == MODE_RESERVE:
+		return rng.randi_range(18, 21)
 	return _pick_weighted_value(rng, Config.YOUTH_AGES, Config.YOUTH_AGE_WEIGHTS)
 
 

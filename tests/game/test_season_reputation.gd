@@ -22,13 +22,18 @@ func _run() -> void:
 	_test_players_follow_minutes_and_strength()
 	_test_player_result_stays_inside_the_drift_cap()
 	_test_a_finished_division_rewrites_both_club_copies()
+	_test_no_league_inflation()
+	_test_cameos_do_not_make_a_star()
+	_test_champion_of_a_lower_league_does_not_lose_prestige()
+	_test_playoff_places_receive_separate_recognition()
+	_test_participants_and_long_run_prestige()
 	_finish()
 
 
 func _test_favorite_moves_less_than_an_outsider() -> void:
 	var favorite := Reputation.table_delta(800, 820, 1, 1, 16)
 	var outsider := Reputation.table_delta(800, 420, 12, 1, 16)
-	_assert(favorite >= 0 and favorite <= Reputation.LEVEL_PULL, "a favorite who wins only creeps")
+	_assert(absi(favorite) <= Reputation.LEVEL_PULL, "an expected winner preserves historical reputation with a small adjustment")
 	_assert(outsider > favorite, "an outsider who wins the same division climbs further")
 
 
@@ -52,6 +57,10 @@ func _test_two_competitions_share_one_cap() -> void:
 	])
 	_assert(combined == Reputation.CLUB_CAP, "league and cup share one annual cap")
 	_assert(combined <= 20, "two titles do not double the jump")
+	_assert(Reputation.combine_club(700, [
+		{"step": 0.0, "pull": -3, "strength": 500, "table_anchor": true},
+		{"step": 0.0, "pull": 0, "strength": 950},
+	]) == -3, "entering a prestigious cup does not erase the league's table adjustment")
 
 
 func _test_players_follow_minutes_and_strength() -> void:
@@ -92,7 +101,7 @@ func _test_a_finished_division_rewrites_both_club_copies() -> void:
 	}
 	var plan := Reputation.plan([division, cup], 1, func(player_id: int) -> Dictionary:
 		if player_id == 7:
-			return {"id": 7, "current_ability": 60, "reputation": 400}
+			return {"id": 7, "current_ability": 60, "reputation": 400, "season_stats": {"minutes": 1200, "matches": 30}}
 		return {}
 	)
 	var clubs: Dictionary = plan.get("clubs", {})
@@ -141,6 +150,75 @@ func _division_unit() -> Dictionary:
 		"rules": {},
 		"playoff": {"enabled": false},
 	}
+
+func _test_no_league_inflation() -> void:
+	_assert(Reputation.table_delta(1000, 850, 34, 34, 34) < 0, "expected last place loses fame even in an elite league")
+	var top := 850
+	var bottom := 850
+	for season in 100:
+		top = PlayerTypes.clamp_reputation(top + Reputation.table_delta(1000, top, 1, 1, 34))
+		bottom = PlayerTypes.clamp_reputation(bottom + Reputation.table_delta(1000, bottom, 34, 34, 34))
+	_assert(top > 850 and bottom < 750 and top - bottom >= 180, "100 repeated performances preserve a clear hierarchy without a 450-point last-place target")
+	_assert(top <= 1000 and bottom >= 0, "long-run fame remains bounded")
+
+func _test_cameos_do_not_make_a_star() -> void:
+	var cameo := Reputation.player_adjustment(1000, 20, 24, 8.0, 80, 24, 3300, 400)
+	var starter := Reputation.player_adjustment(1000, 20, 24, 8.0, 80, 3000, 3300, 400)
+	var idle := Reputation.player_adjustment(1000, 20, 24, 8.0, 80, 0, 3300, 400)
+	_assert(starter > cameo and cameo <= 1, "24 one-minute cameos cannot earn starter recognition")
+	_assert(idle == 0, "zero actual minutes award no fame")
+
+
+func _test_champion_of_a_lower_league_does_not_lose_prestige() -> void:
+	var unit := _division_unit()
+	unit["division_strength"] = 500
+	unit["clubs_by_id"][1]["reputation"] = 900
+	unit["clubs_by_id"][2]["reputation"] = 950
+	unit["playoff"] = {"enabled": true, "champion_id": 2}
+	var result := Reputation.plan([unit], 1, func(_id: int) -> Dictionary: return {})
+	_assert(result["clubs"][2]["delta"] == 0, "an overqualified lower-league champion preserves fame without farming extra prestige")
+	_assert(result["clubs"][1]["delta"] < 0, "a disappointing season can still reduce an established club's fame")
+	_assert(Reputation.chance_delta(500, 950, 100.0, true) == 0, "an expected minor cup title cannot lower or inflate a famous club's reputation")
+
+
+func _test_playoff_places_receive_separate_recognition() -> void:
+	var unit := _division_unit()
+	unit["clubs_by_id"][1]["reputation"] = 500
+	unit["clubs_by_id"][2]["reputation"] = 500
+	unit["playoff"] = {"enabled": true, "champion_id": 2, "series": [
+		{"round": 1, "complete": true, "winner_id": 2, "home_id": 2, "away_id": 1},
+	]}
+	var with_final := Reputation._club_parts(unit, 1)
+	unit["playoff"]["series"] = []
+	var without_final := Reputation._club_parts(unit, 1)
+	var finalist_bonus := 0.0
+	for i in with_final.size():
+		if with_final[i]["club_id"] == 1:
+			finalist_bonus = with_final[i]["step"] - without_final[i]["step"]
+	_assert(finalist_bonus > 0.0, "reaching the final counts separately from the table result")
+	var champion := Reputation._achievement_bonus(800, 500, 1, 700)
+	var finalist := Reputation._achievement_bonus(800, 500, 2, 700)
+	var bronze := Reputation._achievement_bonus(800, 500, 3, 700)
+	var fourth := Reputation._achievement_bonus(800, 500, 4, 700)
+	_assert(champion > finalist and finalist > bronze and bronze > fourth and fourth > 0.0, "playoff achievements have ordered rewards")
+	_assert(Reputation._achievement_bonus(500, 950, 1, 550) == 0.0, "minor titles stop adding prestige above their level")
+
+
+func _test_participants_and_long_run_prestige() -> void:
+	var established := Reputation.table_delta(500, 750, 8, 8, 16, 800)
+	var obscure := Reputation.table_delta(500, 750, 8, 8, 16, 400)
+	_assert(established > obscure, "the same configured level respects the actual prestige of opponents")
+	_assert(absi(established) <= Reputation.LEVEL_PULL, "an expected table result adjusts prestige gradually")
+	var unit := _division_unit()
+	unit["division_strength"] = 500
+	unit["season_player_stats"] = {}
+	unit["playoff"] = {"enabled": true, "champion_id": 2}
+	for season in 150:
+		unit["season_preview"]["season"] = season + 1
+		var result := Reputation.plan([unit], season + 1, func(_id: int) -> Dictionary: return {})
+		Reputation.write_clubs([unit], result["clubs"])
+	_assert(unit["clubs_by_id"][2]["reputation"] < 850, "150 minor league titles do not manufacture a maximum-prestige club")
+	_assert(unit["clubs_by_id"][2]["reputation"] > unit["clubs_by_id"][1]["reputation"], "sustained success still builds a hierarchy")
 
 
 func _assert(ok: bool, label: String) -> void:

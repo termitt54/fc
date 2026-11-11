@@ -30,7 +30,7 @@ alwaysApply: true
 - Keep `competitions.competition_type` only as a legacy/default DB column if needed; UI source of truth for type is the unit.
 - Per-unit shared fields so far: `foreign_players_limit` (`0` none allowed, `-1` no cap, otherwise the squad maximum), `logo_path`, club membership via `competition_unit_clubs` (checkbox picker modal).
 - Type `DIVISIONS` rule rows:
-  - structure: `divisions_count`, `teams_per_division`, `matches_vs_own`, `matches_vs_other`, `points_win`, `points_draw`, `points_loss`
+  - structure: `divisions_count`, `teams_per_division`, `division_sort` (`RANDOM` / `REPUTATION`), `matches_vs_own`, `matches_vs_other`, `points_win`, `points_draw`, `points_loss`. Division membership is dealt again every season: random shuffle, or reputation order striped across divisions (strongest in division 1, next in division 2, then back to 1).
   - division unit strength: `division_strength` on the DIVISION unit itself (one coefficient, 0–1000, default 800), same scale as club reputation. Shown in «Основное» as «Сила». At season close, club and player reputation move from the preview versus the finish, scaled by this coefficient. Cups use the average reputation of the field. One tick per season, clubs first, then players; the annual club move is capped and a player's result stays inside the existing fame drift.
   - movement totals: `teams_promote`, `teams_relegate`, `teams_playoff` — always shown
   - scopes: `movement_scope` / `playoff_scope` = `OVERALL` (общ. табл.) or `PER_DIVISION` (кажд. див.; totals split as `total / divisions_count`)

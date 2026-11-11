@@ -1,4 +1,4 @@
-[gd_scene load_steps=8 format=3 uid="uid://csettings001"]
+[gd_scene load_steps=9 format=3 uid="uid://csettings001"]
 
 [ext_resource type="Script" path="res://scenes/settings/settings.gd" id="1_script"]
 [ext_resource type="PackedScene" path="res://ui/components/we_screen_bg.tscn" id="2_bg"]
@@ -6,6 +6,8 @@
 [ext_resource type="Script" path="res://ui/components/we_tab_bar.gd" id="4_tabs"]
 [ext_resource type="PackedScene" path="res://scenes/settings/tabs/global_pa_tab.tscn" id="5_pa"]
 [ext_resource type="PackedScene" path="res://scenes/settings/tabs/match_sim_tab.tscn" id="6_match"]
+
+[ext_resource type="PackedScene" path="res://scenes/settings/tabs/club_attraction_tab.tscn" id="7_attraction"]
 
 [node name="Settings" type="Control"]
 layout_mode = 3
@@ -87,6 +89,16 @@ grow_horizontal = 2
 grow_vertical = 2
 
 [node name="MatchSim" parent="Margin/VBox/Pages" instance=ExtResource("6_match")]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+visible = false
+
+[node name="ClubAttraction" parent="Margin/VBox/Pages" instance=ExtResource("7_attraction")]
 unique_name_in_owner = true
 layout_mode = 1
 anchors_preset = 15

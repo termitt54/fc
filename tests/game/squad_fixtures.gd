@@ -7,15 +7,7 @@ const PlayerConditionScript := preload("res://game/player_condition.gd")
 const PlayerTypesScript := preload("res://game/player_types.gd")
 
 ## Two keepers plus cover for every outfield slot of an 8v8 formation.
-const POSITIONS := [
-	"GK", "GK",
-	"CB", "CB", "CB",
-	"FB", "FB",
-	"CM", "CM", "CM", "CM",
-	"WM", "WM",
-	"WF", "WF",
-	"ST", "ST", "ST",
-]
+const POSITIONS := ["GK","GK","CB","CB","CB","CB","CB","CB","CB","CM","CM","CM","CM","CM","CM","ST","ST","ST","ST","ST"]
 
 
 static func squad(

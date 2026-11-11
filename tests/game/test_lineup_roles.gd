@@ -14,17 +14,11 @@ func _run() -> void:
 	Config.config_path = "user://config/lineup_roles_test.json"
 	Config.reset_to_defaults(false)
 	var squad := RoleFixtures.specialised_squad()
-	var control := _build(squad, "control")
-	var pressing := _build(squad, "pressing")
-	_check(_starter(control, "CM") == 1008, "control selects the playmaker")
-	_check(_starter(pressing, "CM") == 1009, "pressing selects the ball winner")
-	print("ROLE_SELECTION: control CM %d, pressing CM %d" % [_starter(control, "CM"), _starter(pressing, "CM")])
-	for index in [7, 8]:
-		var ratings := Ratings.of(squad[index])
-		print("ROLE_SCORE: id=%d CA=%.1f control=%.2f pressing=%.2f" % [
-			squad[index]["id"], float(ratings["ability"]) * 100.0,
-			Selector.role_value(ratings, "CM", "control"), Selector.role_value(ratings, "CM", "pressing")])
-	for style in ["control", "pressing"]:
+	var attack := _build(squad,"attacking")
+	var defence := _build(squad,"defensive")
+	_check(attack.starters.map(func(row):return row.player.id)==defence.starters.map(func(row):return row.player.id),"mentality cannot invent different skill weights for selection")
+	_check(attack.starters.any(func(row):return row.slot=="CM" and int(row.player.id)==1010),"passing specialist is selected for midfield")
+	for style in ["attacking", "defensive"]:
 		var lineup := _build(squad, style)
 		var seen: Dictionary = {}
 		for row in lineup["starters"]:
@@ -35,21 +29,21 @@ func _run() -> void:
 			seen[player["id"]] = true
 			keeper_count += int(player["position"] == "GK")
 		_check(keeper_count == 1, "a weak reserve goalkeeper is guaranteed a bench place")
-		_check((lineup["bench"] as Array).size() <= 10, "bench stays within matchday limit")
-		for slot in ["CB", "WM", "CM", "ST"]:
+		_check((lineup["bench"] as Array).size() <= 12, "bench stays within matchday limit")
+		for slot in ["CB", "CM", "ST"]:
 			var covered := false
 			for player in lineup["bench"]:
 				covered = covered or player["position"] == slot
 			_check(covered, "bench covers %s" % slot)
-	squad[7]["condition"] = 20
-	_check(_starter(_build(squad, "control"), "CM") != 1008, "tired specialist loses to fresh cover")
-	squad[7]["condition"] = 100
-	squad[7]["injury_rounds"] = 3
-	_check(_starter(_build(squad, "control"), "CM") != 1008, "injured specialist is excluded")
-	squad[7]["injury_rounds"] = 0
-	squad[7]["suspension_matches"] = 3
-	_check(_starter(_build(squad, "control"), "CM") != 1008, "suspended specialist is excluded")
-	_check((_build([], "control")["starters"] as Array).is_empty(), "empty pool remains safe")
+	squad[9]["condition"] = 20
+	_check(_starter(_build(squad, "attacking"), "CM") != 1010, "tired specialist loses to fresh cover")
+	squad[9]["condition"] = 100
+	squad[9]["injury_rounds"] = 3
+	_check(_starter(_build(squad, "attacking"), "CM") != 1010, "injured specialist is excluded")
+	squad[9]["injury_rounds"] = 0
+	squad[9]["suspension_matches"] = 3
+	_check(_starter(_build(squad, "attacking"), "CM") != 1010, "suspended specialist is excluded")
+	_check((_build([], "attacking")["starters"] as Array).is_empty(), "empty pool remains safe")
 	Config.config_path = Config.DEFAULT_CONFIG_PATH
 	Config.reset_to_defaults(false)
 	print("=== Result: %d passed, %d failed ===" % [passed, failed])
@@ -58,7 +52,7 @@ func _run() -> void:
 func _build(squad: Array, style: String) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 1
-	return Selector.build(squad, [], {}, {"formation": "2-4-1", "style": style}, rng)
+	return Selector.build(squad, [], {}, {"formation": "3-2-2", "style": style}, rng)
 
 func _starter(lineup: Dictionary, slot: String) -> int:
 	for row in lineup["starters"]:

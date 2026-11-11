@@ -77,7 +77,15 @@ static func adjust_morale(player: Dictionary, delta: float) -> void:
 
 
 ## Condition burnt by playing. Intensity comes from the team's style.
+static func match_workload_factor(player: Dictionary) -> float:
+	return MatchTypesScript.GOALKEEPER_WORKLOAD_FACTOR if PlayerTypes.normalize_position(str(player.get("position", ""))) == PlayerTypes.POS_GK else 1.0
+
+
 static func apply_match_load(player: Dictionary, minutes: int, intensity: float) -> void:
+	var native: Variant = NativeSimulation.core()
+	if native != null:
+		native.apply_match_load(player,minutes,intensity)
+		return
 	if minutes < 1:
 		return
 	var ratings := MatchRatings.of(player)
@@ -90,9 +98,7 @@ static func apply_match_load(player: Dictionary, minutes: int, intensity: float)
 	var base_cost := float(MatchTypesScript.CONDITION_MAX) - remaining
 	var share := clampf(float(minutes) / float(MatchTypesScript.REGULAR_MINUTES), 0.0, 1.6)
 	var age_penalty := 1.0 + 0.012 * float(maxi(int(player.get("age", 25)) - 31, 0))
-	var cost := base_cost * share * intensity * age_penalty
-	if bool(ratings.get("professional", false)):
-		cost *= 0.94
+	var cost := base_cost * share * intensity * age_penalty * match_workload_factor(player)
 	player["condition"] = MatchTypesScript.clamp_condition(
 		int(round(float(condition_of(player)) - cost))
 	)
@@ -100,23 +106,31 @@ static func apply_match_load(player: Dictionary, minutes: int, intensity: float)
 
 ## One round of rest: condition regain, injury and morale drift.
 static func advance_round(player: Dictionary, played: bool) -> void:
+	var native: Variant = NativeSimulation.core()
+	if native != null:
+		native.recover_player(player,played)
+		return
 	ensure_state(player)
 	var condition := float(condition_of(player))
-	var rate := MatchSimConfigScript.curve_attr(
-		PlayerTypes.recovery_of(player),
-		"recovery_share_1",
-		"recovery_share_10",
-		"recovery_share_20"
-	)
-	if not played:
-		rate *= MatchSimConfigScript.get_f("recovery_idle_factor")
-	if is_injured(player):
-		rate *= 0.5
-	if int(player.get("age", 25)) >= 33:
-		rate *= 0.92
-	var regain := MatchSimConfigScript.get_f("recovery_floor") \
-		+ (float(MatchTypesScript.CONDITION_MAX) - condition) * rate
-	player["condition"] = MatchTypesScript.clamp_condition(int(round(condition + regain)))
+	# A full battery cannot recover past 100; healing and morale still tick below.
+	if condition < float(MatchTypesScript.CONDITION_MAX):
+		var rate := MatchSimConfigScript.curve_attr(
+			PlayerTypes.recovery_of(player),
+			"recovery_share_1",
+			"recovery_share_10",
+			"recovery_share_20"
+		)
+		if not played:
+			rate *= MatchSimConfigScript.get_f("recovery_idle_factor")
+		if is_injured(player):
+			rate *= 0.5
+		if int(player.get("age", 25)) >= 33:
+			rate *= 0.92
+		var regain := MatchSimConfigScript.get_f("recovery_floor") \
+			+ (float(MatchTypesScript.CONDITION_MAX) - condition) * rate
+		player["condition"] = MatchTypesScript.clamp_condition(int(round(condition + regain)))
+	else:
+		player["condition"] = MatchTypesScript.CONDITION_MAX
 
 	var injury_rounds := int(player.get("injury_rounds", 0))
 	if injury_rounds > 0:
@@ -155,8 +169,6 @@ static func injury_duration(player: Dictionary, grade: String, rng: RandomNumber
 	var base := MatchTypesScript.roll_injury_rounds(grade, rng)
 	var ratings := MatchRatings.of(player)
 	var factor := 1.13 - 0.28 * float(ratings.get("recovery", 0.5))
-	if bool(ratings.get("professional", false)):
-		factor -= 0.05
 	return maxi(1, int(round(float(base) * factor)))
 
 

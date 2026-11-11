@@ -24,11 +24,30 @@ const POINTS_MAX := 99
 const DIVISION_STRENGTH_MIN := 0
 const DIVISION_STRENGTH_MAX := 1000
 const DIVISION_STRENGTH_DEFAULT := 800
+const DIVISION_SORT_RANDOM := "RANDOM"
+const DIVISION_SORT_REPUTATION := "REPUTATION"
+const DIVISION_SORT_ELO := "ELO"
+const DIVISION_SORT_DEFAULT := DIVISION_SORT_RANDOM
 
 const SCOPES := [
 	SCOPE_OVERALL,
 	SCOPE_PER_DIVISION,
 ]
+
+
+static func normalize_division_sort(value: Variant) -> String:
+	var mode := str(value).strip_edges().to_upper()
+	if mode in [DIVISION_SORT_REPUTATION, DIVISION_SORT_ELO]:
+		return mode
+	return DIVISION_SORT_RANDOM
+
+
+static func division_sort_options() -> Array:
+	return [
+		{"id": DIVISION_SORT_RANDOM, "label": "Случайный"},
+		{"id": DIVISION_SORT_REPUTATION, "label": "По репутации"},
+		{"id": DIVISION_SORT_ELO, "label": "По Elo"},
+	]
 
 
 static func normalize_division_strength(stored: Variant) -> int:
@@ -97,6 +116,16 @@ static func quota_hint(total_teams: int, divisions_count: int, scope_code: Strin
 	return "по %d/див." % per_division_quota(total_teams, divisions_count)
 
 
+static func movement_quota_hint(total_teams: int, divisions_count: int, scope_code: String) -> String:
+	if normalize_scope(scope_code) == SCOPE_OVERALL:
+		return "из общ. табл."
+	var count := maxi(divisions_count, 1)
+	var base := per_division_quota(total_teams, count)
+	if total_teams % count == 0:
+		return "по %d/див." % base
+	return "%d всего · по %d–%d/див." % [total_teams, base, base + 1]
+
+
 var _db: Node
 
 
@@ -128,13 +157,14 @@ func get_by_competition(competition_id: int) -> Dictionary:
 			u.ranking_order, u.regular_season_enabled,
 			u.movement_scope, u.playoff_scope,
 			u.playoff_format, u.playoff_series_wins,
-			u.playoff_third_place, u.playoff_seeding, u.prize_rules, u.division_strength,
+			u.group_draw_rules, u.playoff_third_place, u.playoff_seeding, u.prize_rules, u.division_strength, u.division_sort,
 			u.discipline_enabled, u.card_strictness,
 			u.yellow_ban_threshold, u.yellow_ban_matches,
 			u.red_ban_matches, u.double_yellow_red, u.yellow_reset,
 			u.sort_order, u.created_at, u.updated_at,
-			COUNT(uc.club_id) AS clubs_count
+			CASE WHEN c.scope_type = 'INTERNATIONAL' THEN (SELECT COUNT(*) FROM competition_unit_countries nc WHERE nc.unit_id = u.id) ELSE COUNT(uc.club_id) END AS clubs_count
 		FROM competition_units u
+		JOIN competitions c ON c.id = u.competition_id
 		LEFT JOIN competition_unit_clubs uc ON uc.unit_id = u.id
 		WHERE u.competition_id = ?
 		GROUP BY u.id
@@ -160,13 +190,14 @@ func get_by_id(unit_id: int) -> Dictionary:
 			u.ranking_order, u.regular_season_enabled,
 			u.movement_scope, u.playoff_scope,
 			u.playoff_format, u.playoff_series_wins,
-			u.playoff_third_place, u.playoff_seeding, u.prize_rules, u.division_strength,
+			u.group_draw_rules, u.playoff_third_place, u.playoff_seeding, u.prize_rules, u.division_strength, u.division_sort,
 			u.discipline_enabled, u.card_strictness,
 			u.yellow_ban_threshold, u.yellow_ban_matches,
 			u.red_ban_matches, u.double_yellow_red, u.yellow_reset,
 			u.sort_order, u.created_at, u.updated_at,
-			COUNT(uc.club_id) AS clubs_count
+			CASE WHEN c.scope_type = 'INTERNATIONAL' THEN (SELECT COUNT(*) FROM competition_unit_countries nc WHERE nc.unit_id = u.id) ELSE COUNT(uc.club_id) END AS clubs_count
 		FROM competition_units u
+		JOIN competitions c ON c.id = u.competition_id
 		LEFT JOIN competition_unit_clubs uc ON uc.unit_id = u.id
 		WHERE u.id = ?
 		GROUP BY u.id
@@ -201,14 +232,14 @@ func create(data: Dictionary) -> Dictionary:
 			ranking_order, regular_season_enabled,
 			movement_scope, playoff_scope,
 			playoff_format, playoff_series_wins,
-			playoff_third_place, playoff_seeding, prize_rules, division_strength,
+			group_draw_rules, playoff_third_place, playoff_seeding, prize_rules, division_strength, division_sort,
 			discipline_enabled, card_strictness,
 			yellow_ban_threshold, yellow_ban_matches,
 			red_ban_matches, double_yellow_red, yellow_reset,
 			sort_order, created_at, updated_at
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		);
 		""",
 		[
@@ -235,10 +266,12 @@ func create(data: Dictionary) -> Dictionary:
 			payload["playoff_scope"],
 			payload["playoff_format"],
 			payload["playoff_series_wins"],
+			JSON.stringify(payload["group_draw_rules"]),
 			payload["playoff_third_place"],
 			payload["playoff_seeding"],
 			payload["prize_rules"],
 			payload["division_strength"],
+			payload["division_sort"],
 			payload["discipline_enabled"],
 			payload["card_strictness"],
 			payload["yellow_ban_threshold"],
@@ -298,10 +331,12 @@ func update(unit_id: int, data: Dictionary) -> Dictionary:
 			playoff_scope = ?,
 			playoff_format = ?,
 			playoff_series_wins = ?,
+			group_draw_rules = ?,
 			playoff_third_place = ?,
 			playoff_seeding = ?,
 			prize_rules = ?,
 			division_strength = ?,
+			division_sort = ?,
 			discipline_enabled = ?,
 			card_strictness = ?,
 			yellow_ban_threshold = ?,
@@ -336,10 +371,12 @@ func update(unit_id: int, data: Dictionary) -> Dictionary:
 			payload["playoff_scope"],
 			payload["playoff_format"],
 			payload["playoff_series_wins"],
+			JSON.stringify(payload["group_draw_rules"]),
 			payload["playoff_third_place"],
 			payload["playoff_seeding"],
 			payload["prize_rules"],
 			payload["division_strength"],
+			payload["division_sort"],
 			payload["discipline_enabled"],
 			payload["card_strictness"],
 			payload["yellow_ban_threshold"],
@@ -388,6 +425,62 @@ func delete(unit_id: int) -> Dictionary:
 	if not ok:
 		return DbResult.fail("Не удалось удалить элемент состава.")
 	return DbResult.ok({"id": unit_id})
+
+
+func get_country_ids(unit_id: int) -> Dictionary:
+	if not _ensure_ready():
+		return DbResult.fail("База данных недоступна", [])
+	var rows: Array = _db_manager().query_rows("SELECT country_id FROM competition_unit_countries WHERE unit_id = ? ORDER BY country_id;", [unit_id])
+	var ids: Array = []
+	for row in rows:
+		ids.append(int(row["country_id"]))
+	return DbResult.ok_list(ids)
+
+func set_country_ids(unit_id: int, country_ids: Array) -> Dictionary:
+	if not _ensure_ready():
+		return DbResult.fail("База данных недоступна")
+	var existing := get_by_id(unit_id)
+	if not existing["success"]:
+		return existing
+	var db := _db_manager()
+	if not db.execute("BEGIN TRANSACTION;"):
+		return DbResult.fail("Не удалось сохранить сборные")
+	var ok: bool = db.execute_with_bindings("DELETE FROM competition_unit_countries WHERE unit_id = ?;", [unit_id])
+	var unique: Dictionary = {}
+	for raw_id in country_ids:
+		var cid := int(raw_id)
+		if cid < 1 or unique.has(cid):
+			continue
+		unique[cid] = true
+		ok = ok and db.execute_with_bindings("INSERT INTO competition_unit_countries (unit_id, country_id) VALUES (?, ?);", [unit_id, cid])
+	if not ok:
+		db.execute("ROLLBACK;")
+		return DbResult.fail("Не удалось сохранить сборные")
+	if not db.execute("COMMIT;"):
+		db.execute("ROLLBACK;")
+		return DbResult.fail("Не удалось сохранить сборные")
+	return get_by_id(unit_id)
+
+
+## Clubs already placed in another division unit of the same competition.
+func club_ids_in_other_divisions(competition_id: int, unit_id: int) -> Dictionary:
+	if not _ensure_ready():
+		return DbResult.fail("База данных недоступна", [])
+	var rows: Array = _db_manager().query_rows(
+		"""
+		SELECT DISTINCT uc.club_id AS club_id
+		FROM competition_unit_clubs uc
+		JOIN competition_units other ON other.id = uc.unit_id
+		WHERE other.competition_id = ?
+			AND other.id != ?
+			AND other.unit_kind = ?;
+		""",
+		[competition_id, unit_id, CompetitionTypes.UNIT_DIVISION]
+	)
+	var ids: Array = []
+	for row in rows:
+		ids.append(int(row.get("club_id", 0)))
+	return DbResult.ok_list(ids)
 
 
 func get_club_ids(unit_id: int) -> Dictionary:
@@ -460,6 +553,10 @@ func _prepare_payload(data: Dictionary) -> Dictionary:
 	if competition_id < 1:
 		return DbResult.fail("Не выбран турнир.")
 
+	var parents: Array = _db_manager().query_rows("SELECT scope_type FROM competitions WHERE id = ?", [competition_id])
+	if not parents.is_empty() and str(parents[0].get("scope_type", "")) == CompetitionTypes.SCOPE_INTERNATIONAL:
+		data = InternationalDraw.normalize(data)
+
 	var unit_kind: String = str(data.get("unit_kind", "")).strip_edges().to_upper()
 	if not CompetitionTypes.is_valid_unit_kind(unit_kind):
 		return DbResult.fail("Некорректный вид элемента состава.")
@@ -509,9 +606,12 @@ func _prepare_payload(data: Dictionary) -> Dictionary:
 			data.get("playoff_series_wins", PlayoffRules.SERIES_WINS_DEFAULT)
 		),
 		"playoff_third_place": 1 if bool(data.get("playoff_third_place", PlayoffRules.THIRD_PLACE_DEFAULT)) else 0,
+		"group_draw_rules": InternationalDraw.rules(data.get("group_draw_rules", {})),
 		"playoff_seeding": PlayoffRules.normalize_seeding(data.get("playoff_seeding", PlayoffRules.SEEDING_DEFAULT)),
 		"division_strength": serialize_division_strength(data.get("division_strength", DIVISION_STRENGTH_DEFAULT)),
+		"division_sort": normalize_division_sort(data.get("division_sort", DIVISION_SORT_DEFAULT)),
 		"prize_rules": PrizeRules.serialize(data.get("prize_rules", {}), {
+			"competition_type": competition_type,
 			"divisions_count": clampi(int(data.get("divisions_count", DIVISIONS_COUNT_DEFAULT)), 1, RULE_COUNT_MAX),
 			"teams_per_division": clampi(int(data.get("teams_per_division", TEAMS_PER_DIVISION_DEFAULT)), 1, RULE_COUNT_MAX),
 			"teams_playoff": clampi(int(data.get("teams_playoff", TEAMS_PLAYOFF_DEFAULT)), 0, RULE_COUNT_MAX),
@@ -577,9 +677,12 @@ func _normalize_row(row: Dictionary) -> Dictionary:
 			row.get("playoff_series_wins", PlayoffRules.SERIES_WINS_DEFAULT)
 		),
 		"playoff_third_place": int(row.get("playoff_third_place", 0)) == 1,
+		"group_draw_rules": InternationalDraw.rules(row.get("group_draw_rules", {})),
 		"playoff_seeding": PlayoffRules.normalize_seeding(row.get("playoff_seeding", PlayoffRules.SEEDING_DEFAULT)),
 		"division_strength": normalize_division_strength(row.get("division_strength", DIVISION_STRENGTH_DEFAULT)),
+		"division_sort": normalize_division_sort(row.get("division_sort", DIVISION_SORT_DEFAULT)),
 		"prize_rules": PrizeRules.parse_stored(row.get("prize_rules", null), {
+			"competition_type": str(row.get("competition_type", CompetitionTypes.TYPE_LEAGUE)),
 			"divisions_count": int(row.get("divisions_count", DIVISIONS_COUNT_DEFAULT)),
 			"teams_per_division": int(row.get("teams_per_division", TEAMS_PER_DIVISION_DEFAULT)),
 			"teams_playoff": int(row.get("teams_playoff", TEAMS_PLAYOFF_DEFAULT)),

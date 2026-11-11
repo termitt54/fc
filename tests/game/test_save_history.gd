@@ -24,6 +24,8 @@ func _run() -> void:
 	_test_branches()
 	_test_write_failures()
 	_test_actual_interseason()
+	_test_free_agent_retirement()
+	_test_unplayed_retirees()
 	_test_rejected_load()
 	_test_legacy_import()
 	GameSession.clear()
@@ -74,23 +76,33 @@ func _test_branches() -> void:
 	_ok(GameSession.save_game(B), "save as carries history")
 	_check(_identity(B, 1).get("goals", 0) == 5, "new slot keeps career totals")
 	_check(_identity(B, 1).get("snapshot", {}).get("attributes", {}).get("technical", {}).get("finishing", 0) == 12, "full player snapshot retained")
+	var profile := GameSession.get_player_profile(1)
+	_check(profile.get("name", "") == "History Player 1", "live archived player profile keeps name")
+	_check(profile.get("is_retired", false) and profile.get("retired_season", 0) == 20, "profile marks retirement")
+	_check(profile.get("attributes", {}).get("technical", {}).get("finishing", 0) == 12, "profile keeps final attributes")
+	_check(PlayerStats.career_totals(profile).get("goals", 0) == 5, "profile keeps full career statistics")
+	_check(GameSession.get_player(1).is_empty(), "retired profile does not re-enter simulation")
 	_check(not _identity(B, 1).get("snapshot", {}).has("_match_ratings"), "transient rating cache excluded from archive")
 	_ok(GameSession._archive_retired([_player(2, 7)], 21), "append later retirement")
 	GameSession.season_number = 22
 	_ok(GameSession.save_game(C), "save future")
 	_ok(GameSession.load_game(B), "load old point")
 	_check(_count(B) == 1, "old point excludes future player")
+	_check(GameSession.get_player_profile(2).is_empty(), "profile cannot see future branch retirement")
 	_ok(GameSession._archive_retired([_player(2, 99)], 21), "replay same ID on separate branch")
 	_ok(GameSession.save_game(D), "save alternate branch")
 	_check(_identity(C, 2).get("goals", 0) == 7, "future branch unchanged by replay")
 	_check(_identity(D, 2).get("goals", 0) == 99, "alternate branch has its own stats")
+	_check(PlayerStats.career_totals(GameSession.get_player_profile(2)).get("goals", 0) == 99, "profile reads active history branch")
 	_ok(GameSession.load_game(C), "load future branch")
+	_check(PlayerStats.career_totals(GameSession.get_player_profile(2)).get("goals", 0) == 7, "loading another branch changes profile")
 	_ok(GameSession.save_game(E), "copy save shares history")
 	_ok(GameSession.delete_save(C), "delete source slot")
 	_check(_count(E) == 2, "deleting source preserves other slot history")
 	_fresh()
 	_ok(GameSession.save_game(B), "new game overwrites existing slot")
 	_check(_count(B) == 0, "new game does not inherit prior archive")
+	_check(GameSession.get_player_profile(1).is_empty(), "new world does not inherit retired profiles")
 	_check(_count(D) == 2, "other world branch unaffected")
 	var invalid: RefCounted = ARCHIVE.new()
 	_check(not invalid.open("../history"), "reject path-like archive slot")
@@ -108,6 +120,7 @@ func _test_write_failures() -> void:
 	_check(str(failed.get("error", "")).contains("forced history failure"), "injected insert failure returned")
 	_check(GameSession.history_head == 0 and _nodes() == nodes_before, "batch and new history node rolled back together")
 	_check(GameSession._pending_history.size() == 2, "keep entire failed batch for retry")
+	_check(GameSession.get_player_profile(10).get("name", "") == "History Player 10", "pending retirement profile available before archive retry")
 	first["name"] = "Changed after failure"
 	_check(not GameSession.save_game(A)["success"], "cannot save session with missing archive")
 	_check(_count(A) == 0, "failed save preserves previous snapshot")
@@ -148,6 +161,106 @@ func _test_actual_interseason() -> void:
 	_ok(GameSession.start_new_season(), "replay real interseason")
 	_ok(GameSession.save_game(D), "save replay")
 	_check(_count(D) == 1 and _count(B) == 1, "replay does not duplicate retired player")
+
+
+func _test_free_agent_retirement() -> void:
+	_fresh()
+	var waiting := _player(61)
+	var fifth := _player(62)
+	var overdue := _player(63)
+	var legacy := _player(64)
+	for player in [waiting, fifth, overdue, legacy]:
+		player["age"] = 22
+		player["retirement_age"] = 40
+		player.erase("_match_ratings")
+	waiting["free_agent_seasons"] = 3
+	fifth["free_agent_seasons"] = 4
+	overdue["free_agent_seasons"] = 8
+	GameSession.free_agents.assign([waiting, fifth, overdue, legacy])
+	_ok(GameSession.save_game(A), "save clubless season counters")
+	_ok(GameSession.load_game(A), "load clubless season counters")
+	_check(int(GameSession.get_player(62).get("free_agent_seasons", 0)) == 4, "four clubless seasons survive save/load")
+	_ok(GameSession.start_new_season(), "clubless retirement runs at real season boundary")
+	_check(GameSession.get_player(62).is_empty(), "fifth completed clubless season retires a young player")
+	_check(GameSession.get_player(63).is_empty(), "old-save player already over five seasons retires")
+	_check(int(GameSession.get_player(61).get("free_agent_seasons", 0)) == 4, "four completed seasons still allow finding a club")
+	_check(int(GameSession.get_player(64).get("free_agent_seasons", 0)) == 1, "missing old-save counter starts from the observed season")
+	var archived := GameSession.get_player_profile(62)
+	_check(archived.get("is_retired", false) and int(archived.get("retired_season", 0)) == 20, "clubless retiree keeps a profile in the closed season")
+	_check(int(archived.get("season_stats", {}).get("goals", 0)) == 5, "clubless retirement preserves the player statistics")
+	_ok(GameSession.save_game(B), "save clubless retirements")
+	_ok(GameSession.load_game(B), "load clubless retirements")
+	_check(GameSession.get_player(62).is_empty() and GameSession.get_player_profile(62).get("is_retired", false), "retiree stays archived after reload")
+	_ok(GameSession.load_game(A), "load branch before clubless retirement")
+	_check(not GameSession.get_player(62).is_empty(), "old save still contains its active player")
+	var signed := GameSession.get_player(62)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 9155
+	TransferMarket._attach_to_club(GameSession, signed, 10, {"name": "Club", "reputation": 500}, rng)
+	GameSession.free_agents = GameSession.free_agents.filter(func(p): return int(p["id"]) != 62)
+	_check(not signed.has("free_agent_seasons"), "signing a contract resets the consecutive clubless seasons")
+	signed["free_agent_seasons"] = 9
+	_check(not PlayerDevelopment.should_retire(signed, rng), "employed player cannot retire due to an obsolete clubless counter")
+	signed.erase("free_agent_seasons")
+	GameSession.players_by_club[10] = []
+	TransferMarket._release_to_agents(GameSession, 10, "Club", signed)
+	PlayerMarket.drift_reputation(signed, 0)
+	_check(int(signed.get("free_agent_seasons", 0)) == 1 and not PlayerDevelopment.should_retire(signed, rng), "a later release begins a new clubless period")
+	for ca in [69, 70, 71, 90]:
+		var strong := _player(100 + ca)
+		strong["age"] = 24
+		strong["retirement_age"] = 40
+		strong["current_ability"] = ca
+		strong["free_agent_seasons"] = 9
+		_check(PlayerDevelopment.should_retire(strong, rng) == (ca < 70), "clubless retirement threshold respects CA %d" % ca)
+	var veteran := _player(200)
+	veteran["current_ability"] = 90
+	veteran["free_agent_seasons"] = 9
+	_check(PlayerDevelopment.should_retire(veteran, rng), "CA 70+ exemption does not prevent normal age retirement")
+
+
+func _test_unplayed_retirees() -> void:
+	_fresh()
+	var never := _player(301)
+	var national := _player(302)
+	var transferred := _player(303)
+	var past := _player(304)
+	var current := _player(305)
+	for player in [never, national, transferred, past, current]:
+		player["age"] = 22
+		player["retirement_age"] = 40
+		player["free_agent_seasons"] = 4
+		player.erase("_match_ratings")
+	for player in [never, national, transferred, past]:
+		player["season_stats"] = PlayerStats.blank(20, 0)
+	never["development_history"] = [{"season": 18, "ca": 20}, {"season": 20, "ca": 30}]
+	never["career_stats"] = [PlayerStats.blank(18, 1)]
+	var national_row := PlayerStats.blank(19, NationalTeams.TEAM_ID_BASE + 1)
+	national_row["matches"] = 1
+	national_row["minutes"] = 5
+	national["national_stats"] = [national_row]
+	var old_row := PlayerStats.blank(18, 10)
+	old_row["minutes"] = 5
+	past["career_stats"] = [old_row]
+	GameSession.free_agents.assign([never, national, transferred, past, current])
+	GameSession.transfer_log.append({"player_id": 303, "season": 19})
+	transferred["trophies"]=[{"season":19,"place":1}]
+	_ok(GameSession.save_game(A), "save before unplayed retirement")
+	var result := GameSession.start_new_season()
+	_ok(result, "retire unplayed players through real interseason")
+	_check(int(result.get("data", {}).get("retired", 0)) == 5, "retirement count includes discarded players")
+	_check(GameSession.get_player(301).is_empty() and GameSession.get_player_profile(301).is_empty(), "never-played player leaves both active pool and archive")
+	_check(not GameSession.retired_players.any(func(p): return int(p["id"]) == 301), "discarded player is not retained in memory")
+	for id in [302, 304, 305]:
+		_check(GameSession.get_player_profile(id).get("is_retired", false), "preserve national, legacy-minute or current-match history: %d" % id)
+	_check(GameSession.get_player_profile(303).is_empty(), "transfer mention cannot retain a player without matches")
+	_check(GameSession.transfer_log.any(func(row):return int(row.get("player_id",0))==303),"discarding a full profile preserves the transfer event")
+	_ok(GameSession.save_game(B), "save after discarding unplayed retiree")
+	_ok(GameSession.load_game(B), "load after discarding unplayed retiree")
+	_check(GameSession.get_player_profile(301).is_empty(), "discarded profile does not reappear after reload")
+	_check(_count(B) == 3, "only played careers enter archive")
+	_ok(GameSession.load_game(A), "restore earlier branch before discard")
+	_check(not GameSession.get_player(301).is_empty(), "earlier saved branch remains intact")
 
 
 func _test_rejected_load() -> void:

@@ -55,8 +55,27 @@ func _run() -> void:
 		_check(changed == (6 if market_case else 1), "Only finished days publish session changes")
 	fixture["season_day"] = 1
 	_check(GameSession.apply_save_payload(fixture.duplicate(true))["success"], "UI fixture loads")
+	# Country fixtures can legitimately consume every free coach for national teams.
+	# Supply the unemployed profile this UI test needs instead of assuming one exists.
+	if GameSession.coach_market["free"].is_empty():
+		var coach_rng := RandomNumberGenerator.new()
+		coach_rng.seed = 9001
+		var unemployed: Dictionary = Fixtures.coach(9001, coach_rng)
+		unemployed["id"] = GameSession._next_coach_id
+		GameSession._next_coach_id += 1
+		unemployed["club_id"] = 0
+		unemployed["employment_status"] = "free"
+		GameSession.coach_market["free"].append(unemployed)
 	screen = load("res://scenes/game/game_screen.tscn").instantiate()
 	add_child(screen)
+	screen._toggle_directory("coaches")
+	_check(screen._coaches_view.visible and not screen.get_node("%Scroll").visible, "Coach market opens in the game hub")
+	var market_coach: Dictionary = GameSession.coach_market["free"][0]
+	screen._on_market_coach_requested(int(market_coach["id"]))
+	_check(screen._coach_card.is_open() and screen._coach_card.get_coach_id() == int(market_coach["id"]), "Unemployed coach profile opens from market")
+	screen._coach_card.close()
+	_check(screen._coaches_view.visible and screen._directory_mode == "coaches", "Closing the profile returns to coach market")
+	screen._close_directory()
 	busy_checks = false
 	stop_on_progress = true
 	screen._start_simulation(screen.SIM_SEASON)
@@ -78,6 +97,7 @@ func _progress(_stage: String, _done: int, _total: int) -> void:
 		stop_on_progress = false
 		_check(screen.get_node("%AdvanceDayButton").disabled, "UI blocks a second day while busy")
 		_check(not screen.get_node("%SimButton").disabled, "Auto stop stays available during work")
+		_check(screen._coaches_link.disabled, "Coach market navigation is blocked while the day is processing")
 		screen._stop_simulation()
 	if busy_checks:
 		return

@@ -47,6 +47,15 @@ static func build(
 	var clubs := _rate_clubs(unit, squads_by_club, coaches_by_club)
 	var type_code := str(unit.get("competition_type", CompetitionTypes.TYPE_LEAGUE))
 	var sections: Array = []
+	if NationalTeams.is_unit(unit) and type_code == CompetitionTypes.TYPE_DIVISIONS:
+		sections = _league_sections(unit, clubs, rng)
+		for section in sections:
+			section["title"] = str(section["title"]).replace("Дивизион", "Группа")
+			section["note"] = str(section.get("note", "")).replace("дивизион", "группу").replace("с регулярки", "из групп")
+			if str(section.get("id", "")) == "regular":
+				section["title"] = "Группа 1"
+				section["note"] = "Положение в группе"
+		return {"season": season, "competition_type": CompetitionTypes.TYPE_GROUP_AND_PLAYOFF, "sections": sections}
 	match type_code:
 		CompetitionTypes.TYPE_CUP:
 			sections = _cup_sections(clubs, rng, "Кубок", "cup")
@@ -268,6 +277,8 @@ static func _division_pools(unit: Dictionary, clubs: Array) -> Array:
 
 
 static func _playoff_teams(unit: Dictionary) -> int:
+	if NationalTeams.is_unit(unit):
+		return maxi(0, int(unit.get("playoff", {}).get("teams", 0)))
 	var rules: Dictionary = unit.get("rules", {})
 	if rules.has("teams_playoff"):
 		return maxi(0, int(rules.get("teams_playoff", 0)))
@@ -281,6 +292,9 @@ static func _playoff_scope(unit: Dictionary) -> String:
 
 
 static func _simulate_table(clubs: Array, rng: RandomNumberGenerator) -> Array:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return native.preview_table(clubs,rng)
 	var place_sum := {}
 	var titles := {}
 	for club in clubs:
@@ -342,9 +356,12 @@ static func _simulate_playoff(
 	playoff_teams: int,
 	rng: RandomNumberGenerator
 ) -> Array:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return native.preview_playoff(divisions,clubs,playoff_teams,_playoff_scope(unit)==UnitRepository.SCOPE_PER_DIVISION and divisions.size()>1,NationalTeams.is_unit(unit),rng)
 	var per_division := _playoff_scope(unit) == UnitRepository.SCOPE_PER_DIVISION and divisions.size() > 1
 	var quota := UnitRepository.per_division_quota(playoff_teams, maxi(divisions.size(), 1))
-	if per_division and quota < 1:
+	if per_division and quota < 1 and not NationalTeams.is_unit(unit):
 		return []
 	var qualify_wins := {}
 	var title_wins := {}
@@ -354,7 +371,11 @@ static func _simulate_playoff(
 		title_wins[club_id] = 0
 	for _sim in SIMS:
 		var qualified: Array = []
-		if per_division:
+		if per_division and NationalTeams.is_unit(unit):
+			qualified = _national_group_qualifiers(divisions, clubs, playoff_teams, rng)
+			for club_id in qualified:
+				qualify_wins[club_id] = int(qualify_wins.get(club_id, 0)) + 1
+		elif per_division:
 			for pool in divisions:
 				var picked := _top_ids(pool.get("clubs", []), quota, rng)
 				for club_id in picked:
@@ -376,6 +397,32 @@ static func _simulate_playoff(
 	return shown
 
 
+static func _national_group_qualifiers(groups: Array, clubs: Array, count: int, rng: RandomNumberGenerator) -> Array:
+	var ranked_groups: Array = []
+	var longest := 0
+	for group in groups:
+		var members: Array = group.get("clubs", [])
+		ranked_groups.append(_top_ids(members, members.size(), rng))
+		longest = maxi(longest, members.size())
+	var qualified: Array = []
+	for place in longest:
+		var candidates: Array = []
+		for ranked in ranked_groups:
+			if place < ranked.size():
+				candidates.append(int(ranked[place]))
+		if qualified.size() + candidates.size() <= count:
+			qualified.append_array(candidates)
+		else:
+			var remaining: Array = []
+			for club in clubs:
+				if int(club.get("club_id", 0)) in candidates:
+					remaining.append(club)
+			qualified.append_array(_top_ids(remaining, count - qualified.size(), rng))
+		if qualified.size() >= count:
+			break
+	return qualified
+
+
 static func _top_ids(clubs: Array, count: int, rng: RandomNumberGenerator) -> Array:
 	var scored: Array = []
 	for club in clubs:
@@ -393,6 +440,9 @@ static func _top_ids(clubs: Array, count: int, rng: RandomNumberGenerator) -> Ar
 
 
 static func _simulate_knockout(clubs: Array, rng: RandomNumberGenerator, seeded: bool) -> Dictionary:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return native.preview_knockout(clubs,rng,seeded,false)
 	var reached := {}
 	var titles := {}
 	var total_rounds := PrizeRulesScript.playoff_round_count(maxi(clubs.size(), 2))
@@ -429,6 +479,9 @@ static func _simulate_knockout(clubs: Array, rng: RandomNumberGenerator, seeded:
 
 
 static func _one_knockout(clubs: Array, rng: RandomNumberGenerator, seeded: bool) -> Dictionary:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return native.preview_knockout(clubs,rng,seeded,true)
 	var ids: Array = []
 	for club in clubs:
 		ids.append(int(club.get("club_id", 0)))

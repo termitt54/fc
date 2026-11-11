@@ -11,6 +11,10 @@ const MatchTypesScript := preload("res://game/match_types.gd")
 const PlayerMarketScript := preload("res://game/player_market.gd")
 
 const SQUAD_SIZE := PlayerTypesScript.SQUAD_SIZE
+## Generic skills begin at the same level as an academy prospect's profile.
+## Fitting CA then raises the position's weighted skills. Without this cap,
+## starting seniors were universal players while later generations were specialists.
+const GENERAL_PROFILE_CA := 45
 
 ## Fallback when a country has no name pools configured.
 const FALLBACK_FIRST := [
@@ -78,20 +82,20 @@ static func create_player(
 	current_ability = maxi(current_ability, 1)
 	var age := int(spec.get("age", 17))
 	var target_ca := current_ability
-	var attributes := _roll_attributes(rng, position, target_ca)
+	var aptitudes := PlayerTypesScript.roll_aptitudes(rng, position)
+	var attributes := _roll_attributes(rng, position, target_ca, aptitudes)
 	current_ability = PlayerTypesScript.calc_current_ability(attributes, position)
 	if current_ability != target_ca:
-		_fit_attributes_to_target(attributes, position, target_ca)
+		_fit_attributes_to_target(attributes, position, target_ca, aptitudes)
 		current_ability = PlayerTypesScript.calc_current_ability(attributes, position)
 	# Integer attributes cannot always land exactly on a target, so CA stays whatever
 	# the attributes really say and the attributes are pushed down until they fit under PA.
 	var cap := potential_ability
 	while current_ability > potential_ability and cap > 1:
 		cap -= 1
-		_fit_attributes_to_target(attributes, position, cap)
+		_fit_attributes_to_target(attributes, position, cap, aptitudes)
 		current_ability = PlayerTypesScript.calc_current_ability(attributes, position)
 	var characters := _roll_characters(rng)
-	var personality := _roll_personality(rng, characters)
 	var player_rep := _roll_player_reputation(rng, current_ability, reputation)
 	var value := _estimate_value(current_ability, potential_ability, age, player_rep)
 	var contract_years := _roll_contract_years(rng, age, current_ability)
@@ -107,16 +111,18 @@ static func create_player(
 		"nationality_country_id": nationality,
 		"position": position,
 		"value": value,
+		"value_pricing_version": PlayerMarketScript.VALUE_PRICING_VERSION,
 		"contract_status": "club" if club_id > 0 else "free_agent",
 		"contract_years": contract_years,
 		"wage": wage,
 		"reputation": player_rep,
 		"attributes": attributes,
+		PlayerTypesScript.APTITUDES_KEY: aptitudes,
 		"current_ability": current_ability,
 		"potential_ability": potential_ability,
 		"overall": current_ability,
 		"characters": characters,
-		"personality": personality,
+		"player_model_version": PlayerTypesScript.MODEL_VERSION,
 		"development_factor": PlayerDevelopmentScript.roll_development_factor(rng),
 		"is_youth": bool(spec.get("is_youth", false)),
 		"retirement_age": PlayerDevelopmentScript.roll_retirement_age(
@@ -160,9 +166,13 @@ static func team_strength(players: Array) -> float:
 static func _roll_attributes(
 	rng: RandomNumberGenerator,
 	position: String,
-	target_ability: int
+	target_ability: int,
+	aptitudes: Dictionary = {}
 ) -> Dictionary:
-	var base_level := int(round(float(target_ability) / 100.0 * float(PlayerTypesScript.ATTR_MAX)))
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return native.roll_attributes(rng,position,target_ability,aptitudes)
+	var base_level := int(round(float(mini(target_ability, GENERAL_PROFILE_CA)) / 100.0 * float(PlayerTypesScript.ATTR_MAX)))
 	base_level = clampi(base_level, PlayerTypesScript.ATTR_MIN, PlayerTypesScript.ATTR_MAX)
 	var bias := PlayerTypesScript.generation_bias(position)
 	var attributes := {}
@@ -175,6 +185,9 @@ static func _roll_attributes(
 				offset = 1 if int(bias[path]) >= 3 else (1 if rng.randf() < 0.45 else 0)
 			else:
 				offset = -rng.randi_range(0, 1)
+			# Defenders develop finishing too, but start with a defensive skill profile.
+			if position == PlayerTypesScript.POS_CB and path == "technical.finishing":
+				offset -= 3
 			if position == PlayerTypesScript.POS_GK and group != PlayerTypesScript.ATTR_GROUP_GOALKEEPING \
 				and group != PlayerTypesScript.ATTR_GROUP_MENTAL \
 				and group != PlayerTypesScript.ATTR_GROUP_PHYSICAL:
@@ -184,16 +197,18 @@ static func _roll_attributes(
 			var value := base_level + offset + rng.randi_range(-1, 1)
 			group_map[key] = PlayerTypesScript.clamp_attribute(value)
 		attributes[group] = group_map
-	_fit_attributes_to_target(attributes, position, target_ability)
+	_fit_attributes_to_target(attributes, position, target_ability, aptitudes)
+	PlayerTypesScript.settle_secondary(attributes, position, float(target_ability), aptitudes, rng)
 	return attributes
 
 
 static func _fit_attributes_to_target(
 	attributes: Dictionary,
 	position: String,
-	target_ability: int
+	target_ability: int,
+	aptitudes: Dictionary = {}
 ) -> void:
-	PlayerTypesScript.fit_attributes_to_target(attributes, position, target_ability)
+	PlayerTypesScript.fit_attributes_to_target(attributes, position, target_ability, "", aptitudes)
 
 
 static func _build_position_list(rng: RandomNumberGenerator) -> PackedStringArray:
@@ -215,26 +230,8 @@ static func _roll_age(rng: RandomNumberGenerator, target_ability: int) -> int:
 
 
 static func _roll_characters(rng: RandomNumberGenerator) -> Array:
-	var pool: Array = PlayerTypesScript.CHARACTERS.duplicate()
-	var first: String = pool[rng.randi_range(0, pool.size() - 1)]
-	pool.erase(first)
-	var opposite: String = str(PlayerTypesScript.CHARACTER_OPPOSITES.get(first, ""))
-	if not opposite.is_empty() and opposite in pool:
-		pool.erase(opposite)
-	var second: String = pool[rng.randi_range(0, pool.size() - 1)]
-	return [first, second]
-
-
-static func _roll_personality(rng: RandomNumberGenerator, characters: Array) -> Dictionary:
-	var bias: Dictionary = PlayerTypesScript.combined_personality_bias(characters)
-	var out := {}
-	for key in PlayerTypesScript.PERSONALITY_KEYS:
-		var base := rng.randi_range(6, 14)
-		var offset := int(bias.get(key, 0))
-		# Soften stacked biases from two characters.
-		offset = clampi(offset, -6, 6)
-		out[key] = PlayerTypesScript.clamp_personality(base + offset + rng.randi_range(-2, 2))
-	return out
+	var pool: Array = PlayerTypesScript.CHARACTERS
+	return [pool[rng.randi_range(0, pool.size() - 1)]]
 
 
 static func _roll_player_reputation(rng: RandomNumberGenerator, current_ability: int, club_rep: int) -> int:

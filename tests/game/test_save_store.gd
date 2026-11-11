@@ -37,6 +37,8 @@ func _run() -> void:
 func _test_roundtrip() -> void:
 	var applied: Dictionary = GameSession.apply_save_payload(_sample_payload())
 	_assert(applied["success"], "sample session accepted")
+	_assert(GameSession.get_club_players(1)[0].value == 2500000, "legacy appraisal migrates to x2.5 on load")
+	_assert(GameSession.get_club_players(1)[0].asking_price == 3250000, "legacy asking price migrates with appraisal")
 	GameSession._rng.seed = 4242
 	var twin := RandomNumberGenerator.new()
 	twin.seed = GameSession._rng.seed
@@ -62,6 +64,8 @@ func _test_roundtrip() -> void:
 	_assert(GameSession.selected_unit_id == 3, "selected unit")
 	_assert(GameSession.get_club_budget(1) == 250000, "budget keeps int key")
 	_assert(GameSession.get_club_players(1).size() == 1, "club squad restored")
+	_assert(GameSession.get_club_players(1)[0].value == 2500000, "reloading saved appraisal does not multiply it again")
+	_assert(GameSession.get_club_players(1)[0].asking_price == 3250000, "asking price and migration version survive SQLite roundtrip")
 	_assert(str(GameSession.get_club_players(1)[0].get("name", "")) == "Игрок", "player name")
 	_assert(GameSession.get_club_youth_players(2).size() == 40, "youth pool")
 	_assert(GameSession.free_agents.size() == 1, "free agent")
@@ -220,6 +224,8 @@ func _sample_payload() -> Dictionary:
 		"players_by_club": {
 			1: [{
 				"id": 5,
+				"value": 1000000,
+				"asking_price": 1300000,
 				"name": "Игрок",
 				"club_id": 1,
 				"position": "ST",

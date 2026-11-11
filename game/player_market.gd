@@ -30,9 +30,11 @@ const WAGE_AGE_TAIL := 0.65
 
 ## A fee is the salary times a resale multiple, which collapses with age.
 const VALUE_AGE_BANDS: Array = [
-	[18, 48.0], [21, 42.0], [24, 36.0], [27, 30.0], [29, 22.8], [31, 14.4], [33, 7.2], [35, 3.0],
+	[18, 120.0], [21, 105.0], [24, 90.0], [27, 75.0], [29, 57.0], [31, 36.0], [33, 18.0], [35, 7.5],
 ]
-const VALUE_AGE_TAIL := 0.90
+const VALUE_AGE_TAIL := 2.25
+const VALUE_MULTIPLIER := 2.5
+const VALUE_PRICING_VERSION := 2
 
 ## Buyers pay for the gap to potential, and the younger the player the more of it.
 const POTENTIAL_AGE_BANDS: Array = [
@@ -40,7 +42,7 @@ const POTENTIAL_AGE_BANDS: Array = [
 ]
 const POTENTIAL_AGE_TAIL := 0.0
 
-const VALUE_FLOOR := 3000
+const VALUE_FLOOR := 7500
 const VALUE_STEP := 1000
 
 ## Coaches follow the same shape on a flatter curve: their ability band is narrower.
@@ -59,6 +61,9 @@ const REPUTATION_DRIFT_MAX := 35
 
 
 static func wage_for(ability: float, reputation: int, age: int) -> int:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return int(native.market_amount("wage",{"ability":ability,"reputation":reputation,"age":age}))
 	var rated := maxf(ability, 1.0)
 	var rep := maxf(float(PlayerTypesScript.clamp_reputation(reputation)), 1.0)
 	var raw := float(WAGE_AT_PIVOT) \
@@ -74,6 +79,9 @@ static func value_for(
 	age: int,
 	reputation: int
 ) -> int:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return int(native.market_amount("value",{"ability":current_ability,"potential":potential_ability,"reputation":reputation,"age":age}))
 	var ca := float(PlayerTypesScript.clamp_ability(current_ability))
 	var pa := float(PlayerTypesScript.clamp_ability(maxi(potential_ability, current_ability)))
 	var effective := ca + (pa - ca) * _band(POTENTIAL_AGE_BANDS, POTENTIAL_AGE_TAIL, age)
@@ -83,6 +91,9 @@ static func value_for(
 
 
 static func coach_wage_for(current_ability: int, reputation: int, age: int) -> int:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return int(native.market_amount("coach_wage",{"ability":current_ability,"reputation":reputation,"age":age}))
 	var rated := maxf(float(current_ability), 1.0)
 	var rep := maxf(float(PlayerTypesScript.clamp_reputation(reputation)), 1.0)
 	var raw := float(COACH_WAGE_AT_PIVOT) \
@@ -119,9 +130,22 @@ static func expected_value_of(player: Dictionary) -> int:
 static func refresh_value(player: Dictionary) -> int:
 	var value := expected_value_of(player)
 	player["value"] = value
+	player["value_pricing_version"] = VALUE_PRICING_VERSION
 	if bool(player.get("for_sale", false)) and int(player.get("asking_price", 0)) < value:
 		player["asking_price"] = value
 	return value
+
+
+## One-time scale migration; preserve individually edited appraisals and asks.
+## Completed fees in the transfer journal are historical and never repriced.
+static func migrate_value(player: Dictionary) -> void:
+	if int(player.get("value_pricing_version", 1)) >= VALUE_PRICING_VERSION:
+		return
+	var old_value := int(player.get("value", 0))
+	player["value"] = maxi(VALUE_FLOOR, _round_to(old_value * VALUE_MULTIPLIER, VALUE_STEP)) if old_value > 0 else expected_value_of(player)
+	if int(player.get("asking_price", 0)) > 0:
+		player["asking_price"] = maxi(int(player.value), _round_to(float(player.asking_price) * VALUE_MULTIPLIER, VALUE_STEP))
+	player["value_pricing_version"] = VALUE_PRICING_VERSION
 
 
 ## A salary is contract text: it only changes when the deal is signed again.
@@ -145,6 +169,9 @@ const MOVE_LOCAL_WEIGHT := 0.35
 ## New contract at another club. His current wage is the anchor: the destination's
 ## local scale can nudge the offer, it cannot replace a 200k deal with 10k.
 static func wage_for_move(player: Dictionary, club: Dictionary, free_agent: bool = false) -> int:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return int(native.market_amount("move",{"player":player,"club":club,"free_agent":free_agent}))
 	var current := maxi(0, int(player.get("wage", 0)))
 	var personal := expected_wage_of(player)
 	var local := wage_for(
@@ -157,7 +184,9 @@ static func wage_for_move(player: Dictionary, club: Dictionary, free_agent: bool
 	))
 	var anchor := maxi(current, personal)
 	var keep := MOVE_FREE_KEEP_SHARE if free_agent else MOVE_KEEP_SHARE
-	var reservation := int(round(float(anchor) * keep))
+	if PlayerTypesScript.characters_of(player).has(PlayerTypesScript.CHAR_MERCENARY):
+		keep = maxf(keep, 0.90)
+	var reservation := int(ceil(float(anchor) * keep / WAGE_STEP)) * WAGE_STEP
 	var ceiling := int(round(float(maxi(current, WAGE_FLOOR)) * MOVE_RAISE_CAP))
 	# Already underpaid relative to his own market: the new deal can catch up.
 	ceiling = maxi(ceiling, personal)
@@ -172,6 +201,9 @@ static func sign_wage(player: Dictionary, club: Dictionary, free_agent: bool = f
 
 
 static func target_reputation(current_ability: int, club_reputation: int) -> int:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return int(native.market_amount("target_reputation",{"ability":current_ability,"reputation":club_reputation}))
 	var from_ability := float(PlayerTypesScript.clamp_ability(current_ability)) \
 		/ 100.0 * REPUTATION_FROM_ABILITY
 	var club := float(PlayerTypesScript.clamp_reputation(club_reputation))
@@ -180,12 +212,18 @@ static func target_reputation(current_ability: int, club_reputation: int) -> int
 	)))
 
 
-## Fame chases ability without ever jumping: a breakout season is worth ~35 points.
-static func drift_reputation(player: Dictionary, club_reputation: int) -> int:
+## Positive fame comes from season results; inactivity gradually reduces it.
+static func drift_reputation(player: Dictionary, _club_reputation: int) -> int:
 	var current := PlayerTypesScript.clamp_reputation(int(player.get("reputation", 0)))
-	var target := target_reputation(ability_of(player), club_reputation)
-	var step := clampi(target - current, -REPUTATION_DRIFT_MAX, REPUTATION_DRIFT_MAX)
-	var next_value := PlayerTypesScript.clamp_reputation(current + step)
+	var stats: Dictionary = player.get("season_stats", {})
+	var inactive := int(stats.get("minutes", 0)) == 0
+	var fade := 0
+	if int(player.get("club_id", 0)) < 1:
+		player["free_agent_seasons"] = int(player.get("free_agent_seasons", 0)) + 1
+		fade = 6 if inactive else 2
+	elif inactive and int(player.get("age", 16)) >= 21:
+		fade = 2
+	var next_value := PlayerTypesScript.clamp_reputation(current - fade)
 	player["reputation"] = next_value
 	return next_value
 

@@ -1,8 +1,12 @@
 extends Node
+
+const NationalRatingScript = preload("res://game/national_rating.gd")
+const ClubRatingScript = preload("res://game/club_rating.gd")
 ## Runtime new-game session: season clock + loaded tournament units.
 
 
 const SeasonBuilderScript := preload("res://game/season_builder.gd")
+const LeagueMovementScript := preload("res://game/league_movement.gd")
 const MatchDayScript := preload("res://game/match_day.gd")
 const MatchRatingsScript := preload("res://game/match_ratings.gd")
 const PlayerConditionScript := preload("res://game/player_condition.gd")
@@ -30,7 +34,9 @@ const HistoryStoreScript := preload("res://game/history_store.gd")
 const SimulationWorkScript := preload("res://game/simulation_work.gd")
 const TransferMarketJobScript := preload("res://game/transfer_market_job.gd")
 
-const SAVE_VERSION := 11
+const CoachMarketScript := preload("res://game/coach_market.gd")
+
+const SAVE_VERSION := 15
 const DEFAULT_SLOT := "autosave"
 const MARKET_OPEN_DAY := -5
 const MARKET_LAST_DAY := -1
@@ -56,6 +62,9 @@ var youth_players_by_club: Dictionary = {}
 var reserve_players_by_club: Dictionary = {}
 var free_agents: Array = []
 var coaches_by_club: Dictionary = {}
+var coach_market: Dictionary = {}
+var national_teams: Dictionary = {}
+var _national_player_index: Dictionary = {}
 var club_budgets: Dictionary = {}
 var wages_paid_for_season: int = 0
 var transfer_log: Array = []
@@ -66,8 +75,11 @@ var save_slot: String = DEFAULT_SLOT
 var retired_players: Array = []
 var history_head: int = 0
 var _pending_history: Array = []
+var _career_stats_cache_key := ""
+var _career_stats_history: Dictionary = {}
 ## Transient diagnostics, never saved or used by simulation decisions.
 var last_market_profile: Dictionary = {}
+var market_planner_cache: Dictionary = {} # Transient window data, never serialized.
 var last_day_profile: Dictionary = {}
 var last_new_season_profile: Dictionary = {}
 
@@ -77,14 +89,20 @@ var _next_player_id: int = 1
 var _next_coach_id: int = 1
 
 
-func start_new_game() -> Dictionary:
+func start_new_game(seed_override: int = -1) -> Dictionary:
+	market_planner_cache.clear()
 	if is_processing:
 		return DbResult.fail("Дождитесь завершения игрового дня")
 	last_error = ""
 	history_head = 0
 	_pending_history.clear()
+	_career_stats_cache_key = ""
+	_career_stats_history = {}
 	save_slot = DEFAULT_SLOT
-	_rng.randomize()
+	if seed_override >= 0:
+		_rng.seed = seed_override
+	else:
+		_rng.randomize()
 	var built: Dictionary = SeasonBuilderScript.new().build_new_game(_rng)
 	if not built["success"]:
 		last_error = str(built.get("error", "Не удалось начать игру"))
@@ -95,6 +113,9 @@ func start_new_game() -> Dictionary:
 		reserve_players_by_club.clear()
 		free_agents.clear()
 		coaches_by_club.clear()
+		coach_market.clear()
+		national_teams.clear()
+		_national_player_index.clear()
 		club_budgets.clear()
 		wages_paid_for_season = 0
 		transfer_log.clear()
@@ -112,6 +133,9 @@ func start_new_game() -> Dictionary:
 	reserve_players_by_club = _coerce_club_player_map(data.get("reserve_players_by_club", {}))
 	free_agents = _coerce_player_list(data.get("free_agents", []))
 	coaches_by_club = _coerce_club_coach_map(data.get("coaches_by_club", {}))
+	coach_market = {}
+	national_teams = {}
+	_national_player_index.clear()
 	club_budgets.clear()
 	wages_paid_for_season = 0
 	transfer_log.clear()
@@ -128,7 +152,9 @@ func start_new_game() -> Dictionary:
 	season_finished = false
 	_recompute_season_length()
 	is_active = true
+	ClubRatingScript.ensure(self)
 	_begin_calendar_day()
+	NationalTeams.ensure(self)
 	session_changed.emit()
 	selection_changed.emit()
 	return DbResult.ok({
@@ -139,6 +165,7 @@ func start_new_game() -> Dictionary:
 
 
 func clear() -> void:
+	market_planner_cache.clear()
 	if is_processing:
 		return
 	last_work_profile.clear()
@@ -147,6 +174,8 @@ func clear() -> void:
 	last_new_season_profile.clear()
 	history_head = 0
 	_pending_history.clear()
+	_career_stats_cache_key = ""
+	_career_stats_history = {}
 	is_active = false
 	season_number = 1
 	season_day = MARKET_OPEN_DAY
@@ -157,6 +186,9 @@ func clear() -> void:
 	reserve_players_by_club.clear()
 	free_agents.clear()
 	coaches_by_club.clear()
+	coach_market.clear()
+	national_teams.clear()
+	_national_player_index.clear()
 	club_budgets.clear()
 	wages_paid_for_season = 0
 	transfer_log.clear()
@@ -230,6 +262,8 @@ func save_game(slot_name: String = "") -> Dictionary:
 		"reserve_players_by_club": reserve_players_by_club,
 		"free_agents": free_agents,
 		"coaches_by_club": coaches_by_club,
+		"coach_market": coach_market,
+		"national_teams": national_teams,
 		"club_budgets": club_budgets,
 		"transfer_log": transfer_log,
 	}
@@ -294,6 +328,7 @@ func delete_save(slot_name: String) -> Dictionary:
 
 
 func apply_save_payload(payload: Dictionary) -> Dictionary:
+	market_planner_cache.clear()
 	if is_processing:
 		return DbResult.fail("Дождитесь завершения игрового дня")
 	var version := int(payload.get("version", 0))
@@ -302,16 +337,35 @@ func apply_save_payload(payload: Dictionary) -> Dictionary:
 	for section in ["units", "free_agents", "transfer_log"]:
 		if payload.has(section) and typeof(payload[section]) != TYPE_ARRAY:
 			return DbResult.fail("Повреждённое сохранение: секция %s" % section)
-	for section in ["players_by_club", "youth_players_by_club", "reserve_players_by_club", "coaches_by_club", "club_budgets"]:
+	for section in ["players_by_club", "youth_players_by_club", "reserve_players_by_club", "coaches_by_club", "club_budgets", "coach_market", "national_teams"]:
 		if payload.has(section) and typeof(payload[section]) != TYPE_DICTIONARY:
 			return DbResult.fail("Повреждённое сохранение: секция %s" % section)
+	var national_raw: Dictionary = payload.get("national_teams", {})
+	for raw_team in national_raw.values():
+		if typeof(raw_team) != TYPE_DICTIONARY:
+			return DbResult.fail("Повреждённое сохранение: сборная")
+		for key in ["country", "coach", "discipline"]:
+			if typeof(raw_team.get(key, {})) != TYPE_DICTIONARY:
+				return DbResult.fail("Повреждённое сохранение: данные сборной")
+		for key in ["squad_ids", "withdrawn_ids"]:
+			if typeof(raw_team.get(key, [])) != TYPE_ARRAY:
+				return DbResult.fail("Повреждённое сохранение: заявка сборной")
+	var market_raw: Dictionary = payload.get("coach_market", {})
+	for pool in ["free", "retired", "events"]:
+		if typeof(market_raw.get(pool, [])) != TYPE_ARRAY:
+			return DbResult.fail("Повреждённое сохранение: рынок тренеров")
+		for row in market_raw.get(pool, []):
+			if typeof(row) != TYPE_DICTIONARY:
+				return DbResult.fail("Повреждённое сохранение: запись рынка тренеров")
+	if typeof(market_raw.get("expectations", {})) != TYPE_DICTIONARY:
+		return DbResult.fail("Повреждённое сохранение: ожидания клубов")
 	if int(payload.get("history_head", 0)) < 0:
 		return DbResult.fail("Повреждённое сохранение: версия истории")
 	last_error = ""
 	history_head = int(payload.get("history_head", 0))
 	_pending_history.clear()
 	retired_players.clear()
-	var native := bool(payload.get("_native", false)) and version == SAVE_VERSION
+	var native := bool(payload.get("_native", false)) and version >= 13
 	season_number = int(payload.get("season_number", 1))
 	season_day = int(payload.get("season_day", MARKET_OPEN_DAY))
 	season_total_days = int(payload.get("season_total_days", 1))
@@ -339,10 +393,6 @@ func apply_save_payload(payload: Dictionary) -> Dictionary:
 		coaches_by_club = _coerce_club_coach_map(payload.get("coaches_by_club", {}))
 		club_budgets = ClubFinanceScript.coerce_budgets(payload.get("club_budgets", {}))
 		transfer_log = _coerce_player_list(payload.get("transfer_log", []))
-		_migrate_loaded_players(players_by_club)
-		_migrate_loaded_players(youth_players_by_club)
-		_migrate_loaded_players(reserve_players_by_club)
-		_migrate_player_list(free_agents)
 		_migrate_loaded_coaches()
 		if payload.has("wages_paid_for_season"):
 			wages_paid_for_season = int(payload.get("wages_paid_for_season", 0))
@@ -351,13 +401,29 @@ func apply_save_payload(payload: Dictionary) -> Dictionary:
 		else:
 			wages_paid_for_season = 0
 		_next_match_id = _max_match_id() + 1
+	# Native section storage can still contain players from an older model.
+	_migrate_loaded_players(players_by_club)
+	_migrate_loaded_players(youth_players_by_club)
+	_migrate_loaded_players(reserve_players_by_club)
+	_migrate_player_list(free_agents)
+	if version < 15:
+		_migrate_twenty_player_rosters()
+	national_teams = _coerce_club_coach_map(payload.get("national_teams", {}))
+	coach_market = payload.get("coach_market", {}).duplicate(true)
+	coach_market["expectations"] = _coerce_club_coach_map(coach_market.get("expectations", {}))
+	CoachMarketScript.ensure(self)
 	_ensure_club_budgets()
 	_next_player_id = int(payload.get("next_player_id", _max_player_id() + 1))
-	_next_coach_id = int(payload.get("next_coach_id", _max_coach_id() + 1))
+	_next_coach_id = maxi(int(payload.get("next_coach_id", 1)), _max_coach_id() + 1)
 	if payload.has("rng_seed"):
 		_rng.seed = int(payload.get("rng_seed", 0))
 	if payload.has("rng_state"):
 		_rng.state = int(payload.get("rng_state", _rng.state))
+	for team in national_teams.values():
+		team["discipline"] = _coerce_club_coach_map(team.get("discipline", {}))
+	CoachMarketScript.initialize_loaded_pool(self)
+	NationalTeams.ensure(self)
+	ClubRatingScript.ensure(self)
 	is_active = true
 	session_changed.emit()
 	selection_changed.emit()
@@ -398,9 +464,11 @@ func select_unit(unit_id: int) -> void:
 
 func club_name(unit: Dictionary, club_id: int, short: bool = false) -> String:
 	var clubs: Dictionary = unit.get("clubs_by_id", {})
-	if not clubs.has(club_id):
+	var club: Dictionary = clubs.get(club_id, {})
+	if club.is_empty():
+		club = get_club_identity(club_id)
+	if club.is_empty():
 		return "Клуб #%d" % club_id
-	var club: Dictionary = clubs[club_id]
 	if short:
 		var short_name: String = str(club.get("short_name", "")).strip_edges()
 		if not short_name.is_empty():
@@ -409,6 +477,8 @@ func club_name(unit: Dictionary, club_id: int, short: bool = false) -> String:
 
 
 func get_club_players(club_id: int) -> Array:
+	if NationalTeams.is_team(club_id):
+		return NationalTeams.roster(self, club_id)
 	if players_by_club.has(club_id):
 		return players_by_club[club_id]
 	return []
@@ -427,6 +497,8 @@ func get_club_reserve_players(club_id: int) -> Array:
 
 
 func get_club_coach(club_id: int) -> Dictionary:
+	if NationalTeams.is_team(club_id):
+		return (national_teams.get(club_id - NationalTeams.TEAM_ID_BASE, {}) as Dictionary).get("coach", {})
 	if coaches_by_club.has(club_id):
 		var coach: Variant = coaches_by_club[club_id]
 		if typeof(coach) == TYPE_DICTIONARY:
@@ -455,6 +527,10 @@ func adjust_club_budget(club_id: int, delta: int) -> int:
 
 
 func get_coach(coach_id: int) -> Dictionary:
+	for team in national_teams.values():
+		var coach: Dictionary = team.get("coach", {})
+		if int(coach.get("id", 0)) == coach_id:
+			return coach
 	if coach_id < 1:
 		return {}
 	for club_id in coaches_by_club.keys():
@@ -463,6 +539,10 @@ func get_coach(coach_id: int) -> Dictionary:
 			continue
 		if int(coach.get("id", 0)) == coach_id:
 			return coach
+	for pool in ["free", "retired"]:
+		for coach in coach_market.get(pool, []):
+			if int(coach.get("id", 0)) == coach_id:
+				return coach
 	return {}
 
 
@@ -494,12 +574,112 @@ func get_all_player_rows() -> Array:
 	return rows
 
 
+## Profile lookup only: retired players must never re-enter simulation pools.
+## Query one indexed record in the current history branch, not the whole archive.
+func get_player_profile(player_id: int) -> Dictionary:
+	var active := get_player(player_id)
+	if not active.is_empty() or player_id < 1:
+		return active
+	for record in _pending_history:
+		if int(record.get("identity", {}).get("player_id", 0)) == player_id:
+			return _archived_profile(record["identity"], record.get("player", {}), record.get("seasons", []))
+	if history_head <= 0:
+		return {}
+	var archive := CareerArchiveScript.new()
+	if not archive.open_head(history_head):
+		return {}
+	var identity: Dictionary = archive.get_player(player_id)
+	var seasons: Array = archive.seasons_of(player_id) if not identity.is_empty() else []
+	archive.close()
+	if identity.is_empty():
+		return {}
+	return _archived_profile(identity, identity.get("snapshot", {}), seasons)
+
+
+func _archived_profile(identity: Dictionary, snapshot: Dictionary, seasons: Array) -> Dictionary:
+	var profile := snapshot.duplicate(true)
+	if profile.is_empty():
+		profile = identity.duplicate(true)
+		profile.erase("snapshot")
+		profile["id"] = int(identity.get("player_id", 0))
+		profile["club_id"] = int(identity.get("final_club_id", 0))
+		profile["career_stats"] = seasons.duplicate(true)
+	profile["is_retired"] = true
+	profile["retired_season"] = int(identity.get("retired_season", 0))
+	return profile
+
+
+## Historical clubs can now participate in a different league.
+func get_club_identity(club_id: int) -> Dictionary:
+	if NationalTeams.is_team(club_id):
+		var country: Dictionary = national_teams.get(club_id - NationalTeams.TEAM_ID_BASE, {}).get("country", {})
+		return NationalTeams.identity(country) if not country.is_empty() else {}
+	for unit in units:
+		var clubs: Dictionary = unit.get("clubs_by_id", {})
+		if clubs.has(club_id):
+			return clubs[club_id]
+	if club_id > 0 and WorldDatabase.is_ready():
+		var result: Dictionary = ClubRepository.new().get_by_id(club_id)
+		if result.get("success", false):
+			return result.get("data", {})
+	return {}
+
+
 func get_market_player_rows() -> Array:
 	var countries := _countries_by_id()
 	var rows: Array = []
 	_append_listed_player_rows(rows, countries)
 	_append_free_agent_rows(rows, countries)
 	return rows
+
+
+## One row per club: full name, country, reputation, squad ratings and budget.
+func get_club_rows() -> Array:
+	var clubs := _collect_session_clubs()
+	var countries := _countries_by_id()
+	var rows: Array = []
+	for club_id in clubs.keys():
+		var id := int(club_id)
+		var club: Dictionary = clubs[id] if typeof(clubs[id]) == TYPE_DICTIONARY else {}
+		var country_id := int(club.get("country_id", 0))
+		var country: Dictionary = countries.get(country_id, {})
+		var country_name := str(country.get("name", "")).strip_edges()
+		if country_name.is_empty() and country_id > 0:
+			country_name = "Страна #%d" % country_id
+		var name := str(club.get("name", "")).strip_edges()
+		if name.is_empty():
+			name = "Клуб #%d" % id
+		var rating := _club_player_rating(id)
+		rows.append({
+			"id": id,
+			"name": name,
+			"logo_path": str(club.get("logo_path", "")),
+			"country_id": country_id,
+			"country_name": country_name,
+			"flag_path": str(country.get("flag_path", "")),
+			"reputation": int(club.get("reputation", 0)),
+			"strength_total": int(rating["total"]),
+			"strength_avg": float(rating["average"]),
+			"player_count": int(rating["count"]),
+			"budget": get_club_budget(id),
+		})
+	return rows
+
+
+func _club_player_rating(club_id: int) -> Dictionary:
+	var total := 0
+	var count := 0
+	for pool in [get_club_players(club_id), get_club_reserve_players(club_id), get_club_youth_players(club_id)]:
+		for player in pool:
+			if typeof(player) != TYPE_DICTIONARY:
+				continue
+			total += int(player.get("current_ability", player.get("overall", 0)))
+			count += 1
+	return {
+		"total": total,
+		"average": 0.0 if count == 0 else float(total) / float(count),
+		"count": count,
+	}
 
 
 func get_club_transfers(club_id: int) -> Array:
@@ -530,6 +710,10 @@ func get_player_transfers(player_id: int) -> Array:
 
 
 func _begin_calendar_day() -> void:
+	if season_day == MARKET_OPEN_DAY:
+		CoachMarketScript.open_market(self, _rng)
+	if season_day == FIRST_MATCH_DAY:
+		CoachMarketScript.prepare(self, _rng)
 	last_market_profile = {}
 	if is_market_day(season_day):
 		var result: Dictionary
@@ -538,6 +722,10 @@ func _begin_calendar_day() -> void:
 
 
 func _begin_calendar_day_async(work: RefCounted) -> void:
+	if season_day == MARKET_OPEN_DAY:
+		CoachMarketScript.open_market(self, _rng)
+	if season_day == FIRST_MATCH_DAY:
+		CoachMarketScript.prepare(self, _rng)
 	last_market_profile = {}
 	if is_market_day(season_day):
 		var job: RefCounted = TransferMarketJobScript.new(TransferMarketScript, self, _rng)
@@ -639,6 +827,8 @@ func _advance_day_sync() -> Dictionary:
 
 	if not is_market_day(season_day):
 		for unit in units:
+			if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
+				continue
 			var started: Dictionary = PlayoffManagerScript.maybe_start(unit, season_day, _next_match_id)
 			_next_match_id = int(started.get("next_match_id", _next_match_id))
 			if bool(started.get("started", false)) and _yellow_reset_of(unit) == DisciplineRulesScript.RESET_PLAYOFF:
@@ -647,6 +837,7 @@ func _advance_day_sync() -> Dictionary:
 				unit, season_day, _next_match_id, season_number
 			)
 			_next_match_id = int(progressed.get("next_match_id", _next_match_id))
+			NationalRatingScript.close_completed(self)
 			PlayoffManagerScript.capture_season_if_ready(unit, season_number)
 		last_day_profile["playoff_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
 		phase_start = Time.get_ticks_usec()
@@ -655,6 +846,9 @@ func _advance_day_sync() -> Dictionary:
 		phase_start = Time.get_ticks_usec()
 		_apply_unit_prizes()
 
+	if not is_market_day(season_day):
+		NationalTeams.start_window(self)
+	CoachMarketScript.review(self, _rng)
 	season_day = next_calendar_day(season_day)
 	_pay_season_wages_if_due()
 	last_day_profile["prizes_and_wages_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
@@ -695,6 +889,8 @@ func _advance_day_impl(work: RefCounted = null) -> Dictionary:
 
 	if not is_market_day(season_day):
 		for unit in units:
+			if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
+				continue
 			if work != null:
 				await work.checkpoint("Плей-офф")
 			var started: Dictionary = PlayoffManagerScript.maybe_start(unit, season_day, _next_match_id)
@@ -705,6 +901,7 @@ func _advance_day_impl(work: RefCounted = null) -> Dictionary:
 				unit, season_day, _next_match_id, season_number
 			)
 			_next_match_id = int(progressed.get("next_match_id", _next_match_id))
+			NationalRatingScript.close_completed(self)
 			PlayoffManagerScript.capture_season_if_ready(unit, season_number)
 		last_day_profile["playoff_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
 		phase_start = Time.get_ticks_usec()
@@ -716,6 +913,9 @@ func _advance_day_impl(work: RefCounted = null) -> Dictionary:
 		phase_start = Time.get_ticks_usec()
 		_apply_unit_prizes()
 
+	if not is_market_day(season_day):
+		NationalTeams.start_window(self)
+	CoachMarketScript.review(self, _rng)
 	season_day = next_calendar_day(season_day)
 	_pay_season_wages_if_due()
 	last_day_profile["prizes_and_wages_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
@@ -748,6 +948,10 @@ func start_new_season() -> Dictionary:
 		return DbResult.fail("Нет активной игры")
 	if not season_finished and not _all_units_complete():
 		return DbResult.fail("Сезон ещё не завершён")
+	var club_units: Array = units.filter(func(unit): return not NationalTeams.is_unit(unit))
+	var movement_plan := LeagueMovementScript.plan(units, sorted_standings)
+	if not movement_plan["success"]:
+		return movement_plan
 	var history_written: Dictionary = _flush_history()
 	if not history_written["success"]:
 		return history_written
@@ -756,18 +960,24 @@ func start_new_season() -> Dictionary:
 	var phase_start := Time.get_ticks_usec()
 	last_new_season_profile = {}
 	_apply_unit_prizes()
-	var reputation_plan := SeasonReputationScript.plan(units, closed_season, func(player_id: int) -> Dictionary:
+	var reputation_plan := SeasonReputationScript.plan(club_units, closed_season, func(player_id: int) -> Dictionary:
 		return get_player(player_id)
 	)
 	SeasonReputationScript.write_clubs(units, reputation_plan.get("clubs", {}))
 	last_new_season_profile["reputation_and_prizes_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
 	phase_start = Time.get_ticks_usec()
+	CoachMarketScript.close_season(self, _rng)
+	NationalRatingScript.close_completed(self)
+	NationalTeams.close_season(self, _rng)
+	_national_player_index.clear()
 	season_number += 1
 	season_day = MARKET_OPEN_DAY
 	season_finished = false
 
+	LeagueMovementScript.apply(units, movement_plan["data"])
 	for i in units.size():
 		units[i] = _reset_unit_for_new_season(units[i])
+	ClubRatingScript.ensure(self)
 	last_new_season_profile["reset_competitions_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
 
 	phase_start = Time.get_ticks_usec()
@@ -781,6 +991,7 @@ func start_new_season() -> Dictionary:
 	last_new_season_profile["player_development_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
 	phase_start = Time.get_ticks_usec()
 	retired_players = _retire_players()
+	var retired_count := retired_players.size()
 	_roll_player_stats()
 	var archived: Dictionary = _archive_retired(retired_players, closed_season)
 	last_new_season_profile["retirement_stats_archive_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
@@ -808,13 +1019,16 @@ func start_new_season() -> Dictionary:
 	return DbResult.ok({
 		"season_number": season_number,
 		"season_day": season_day,
-		"retired": retired_players.size(),
+		"retired": retired_count,
+		"league_movements": movement_plan["data"],
 	})
 
 
 func _simulate_day(day: int) -> Dictionary:
 	var tick := {"clubs": {}, "players": {}}
 	for unit in units:
+		if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
+			continue
 		var rules: Dictionary = unit.get("rules", {})
 		var points_win: int = int(rules.get("points_win", 3))
 		var points_draw: int = int(rules.get("points_draw", 1))
@@ -841,17 +1055,22 @@ func _simulate_day(day: int) -> Dictionary:
 
 func _simulate_day_async(day: int, work: RefCounted = null) -> Dictionary:
 	var tick := {"clubs": {}, "players": {}}
+	var scanned := 0
 	for unit in units:
+		if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
+			continue
 		var rules: Dictionary = unit.get("rules", {})
 		var points_win: int = int(rules.get("points_win", 3))
 		var points_draw: int = int(rules.get("points_draw", 1))
 		var points_loss: int = int(rules.get("points_loss", 0))
 		for match_row in unit.get("matches", []):
-			if work != null:
+			scanned += 1
+			var due := int(match_row.get("season_day", 0)) == day and not bool(match_row.get("played", false))
+			# Keep cancellation/UI checkpoints bounded while scanning the calendar,
+			# without creating an awaited call for every game of the entire season.
+			if work != null and (due or scanned % 128 == 0):
 				await work.checkpoint("Матчи")
-			if int(match_row.get("season_day", 0)) != day:
-				continue
-			if bool(match_row.get("played", false)):
+			if not due:
 				continue
 			MatchDayScript.simulate(self, unit, match_row, tick, _rng)
 			if str(match_row.get("stage", "REGULAR")) == "REGULAR":
@@ -935,14 +1154,17 @@ func _reset_unit_for_new_season(unit: Dictionary) -> Dictionary:
 	var matches: Array = []
 	var divisions: Array = next.get("divisions", [])
 
-	if competition_type == CompetitionTypes.TYPE_DIVISIONS:
+	if competition_type == CompetitionTypes.TYPE_DIVISIONS and not NationalTeams.is_unit(next):
 		var generated: Dictionary = FixtureGeneratorScript.build_regular_season(
 			club_ids,
 			int(rules.get("divisions_count", CompetitionUnitRepository.DIVISIONS_COUNT_DEFAULT)),
 			int(rules.get("teams_per_division", CompetitionUnitRepository.TEAMS_PER_DIVISION_DEFAULT)),
 			int(rules.get("matches_vs_own", CompetitionUnitRepository.MATCHES_VS_OWN_DEFAULT)),
 			int(rules.get("matches_vs_other", CompetitionUnitRepository.MATCHES_VS_OTHER_DEFAULT)),
-			_rng
+			_rng,
+			[],
+			str(rules.get("division_sort", "")),
+			FixtureGeneratorScript.division_scores_of(club_ids, next.get("clubs_by_id", {}), str(rules.get("division_sort", "")), ClubRatingScript.strength_of(next))
 		)
 		divisions = generated["divisions"]
 		matches = generated["matches"]
@@ -962,6 +1184,11 @@ func _reset_unit_for_new_season(unit: Dictionary) -> Dictionary:
 	next["playoff"] = playoff
 	next.erase("prizes_paid_for_season")
 	next.erase("season_preview")
+	if NationalTeams.is_unit(next):
+		next["international_started"] = false
+		next.erase("international_start_day")
+		next.erase("group_draw")
+		next.erase("national_rating")
 	# winners history preserved
 	return next
 
@@ -988,7 +1215,14 @@ func _empty_standings(divisions: Array) -> Array:
 
 func _recompute_season_length() -> void:
 	var max_day := 1
+	var pending_international_days := 0
 	for unit in units:
+		if NationalTeams.is_unit(unit):
+			if not NationalTeams.due(unit, season_number):
+				continue
+			if not bool(unit.get("international_started", false)):
+				pending_international_days += int(unit.get("estimated_days", 1))
+				continue
 		for match_row in unit.get("matches", []):
 			max_day = maxi(max_day, int(match_row.get("season_day", 1)))
 		var playoff: Dictionary = unit.get("playoff", {})
@@ -998,7 +1232,7 @@ func _recompute_season_length() -> void:
 				if str(match_row.get("stage", "REGULAR")) == "REGULAR":
 					regular_max = maxi(regular_max, int(match_row.get("season_day", 1)))
 			max_day = maxi(max_day, regular_max + PlayoffManagerScript.estimate_days(playoff))
-	season_total_days = max_day
+	season_total_days = max_day + pending_international_days
 
 
 func _refresh_season_finished() -> void:
@@ -1009,6 +1243,11 @@ func _all_units_complete() -> bool:
 	if units.is_empty():
 		return false
 	for unit in units:
+		if NationalTeams.is_unit(unit):
+			if not NationalTeams.due(unit, season_number):
+				continue
+			if not bool(unit.get("international_started", false)):
+				return false
 		if not PlayoffManagerScript.is_unit_season_complete(unit):
 			return false
 	return true
@@ -1179,8 +1418,6 @@ func _migrate_loaded_coaches() -> void:
 				fallback = CoachTypesScript.clamp_attr(int(round(float(total) / float(count))))
 			attributes[CoachTypesScript.ATTR_NEGOTIATIONS] = fallback
 		coach["attributes"] = attributes
-		if not coach.has("style"):
-			coach["style"] = CoachTypesScript.STYLE_BALANCED
 		TacticTypesScript.ensure_coach_tactics(coach)
 		if not coach.has("career"):
 			coach["career"] = []
@@ -1200,7 +1437,10 @@ func _migrate_player_list(players: Array) -> void:
 		if typeof(player) != TYPE_DICTIONARY:
 			continue
 		player.erase("number")
+		PlayerMarketScript.migrate_value(player)
 		player["position"] = PlayerTypes.normalize_position(str(player.get("position", "")))
+		MatchRatingsScript.invalidate(player)
+		player.erase("secondary_positions")
 		if not player.has("development_factor"):
 			player["development_factor"] = 0.92
 		if not player.has("potential_ability"):
@@ -1355,6 +1595,8 @@ func _countries_by_id() -> Dictionary:
 func _collect_session_clubs() -> Dictionary:
 	var clubs: Dictionary = {}
 	for unit in units:
+		if NationalTeams.is_unit(unit):
+			continue
 		var by_id: Dictionary = unit.get("clubs_by_id", {})
 		for club_id in by_id.keys():
 			clubs[int(club_id)] = by_id[club_id]
@@ -1382,6 +1624,8 @@ func _ensure_club_budgets() -> void:
 func _apply_unit_prizes() -> void:
 	for i in units.size():
 		var unit: Dictionary = units[i]
+		if NationalTeams.is_unit(unit):
+			continue
 		if typeof(unit) != TYPE_DICTIONARY:
 			continue
 		if int(unit.get("prizes_paid_for_season", 0)) == season_number:
@@ -1391,6 +1635,8 @@ func _apply_unit_prizes() -> void:
 		var rules: Dictionary = unit.get("rules", {})
 		if rules.is_empty():
 			rules = unit
+		elif not rules.has("competition_type"):
+			rules = rules.merged({"competition_type": unit.get("competition_type", CompetitionTypes.TYPE_LEAGUE)})
 		var snapshot: Dictionary = unit
 		var payouts: Dictionary = PrizeRulesScript.payouts(
 			rules,
@@ -1410,6 +1656,8 @@ func _apply_unit_prizes() -> void:
 func _publish_season_previews(work: RefCounted = null) -> void:
 	for i in units.size():
 		var unit: Dictionary = units[i]
+		if NationalTeams.is_unit(unit):
+			continue
 		var existing: Dictionary = unit.get("season_preview", {})
 		if int(existing.get("season", 0)) == season_number:
 			continue
@@ -1424,6 +1672,8 @@ func _publish_season_previews_async(work: RefCounted = null) -> void:
 		if work != null:
 			await work.checkpoint("Превью турниров", i, units.size())
 		var unit: Dictionary = units[i]
+		if NationalTeams.is_unit(unit):
+			continue
 		var existing: Dictionary = unit.get("season_preview", {})
 		if int(existing.get("season", 0)) == season_number:
 			continue
@@ -1455,16 +1705,18 @@ func _process_contract_renewals() -> Dictionary:
 	var released := 0
 	var renewed := 0
 	var clubs := _collect_session_clubs()
+	var world_top := PlayerOffer.world_top_reputation(clubs)
 	for club_id in clubs.keys():
 		var id := int(club_id)
 		var club_raw: Variant = clubs.get(id, {})
 		var club: Dictionary = club_raw if typeof(club_raw) == TYPE_DICTIONARY else {}
 		var coach := get_club_coach(id)
+		var core: Dictionary = TransferMarket._squad_market_info(self, id, get_club_players(id))["starters"]
 		var kept: Array = []
 		for player in get_club_players(id):
 			if typeof(player) != TYPE_DICTIONARY:
 				continue
-			var outcome := ContractRenewalScript.process_player(player, club, coach, _rng)
+			var outcome := ContractRenewalScript.process_player(player, club, coach, _rng, {"key_player": core.has(int(player.get("id", 0))), "world_top_reputation": world_top})
 			if outcome == ContractRenewalScript.REASON_RELEASED:
 				free_agents.append(player)
 				released += 1
@@ -1634,6 +1886,9 @@ func _load_countries_for_clubs(clubs: Dictionary) -> Dictionary:
 			"id": country_id,
 			"youth_talent": YouthGenerationConfigScript.YOUTH_TALENT_DEFAULT,
 		}
+	for country_id in countries:
+		var team: Dictionary = national_teams.get(country_id, {})
+		if not team.is_empty(): countries[country_id] = team.country
 	return countries
 
 
@@ -1718,12 +1973,28 @@ func _retire_players() -> Array:
 
 
 func _archive_retired(retired: Array, season: int) -> Dictionary:
+	var kept: Array = []
 	for player in retired:
+		# A transfer-log mention or an unused squad medal is not a played career.
+		if not HistoryStoreScript.has_playing_history(player):
+			continue
+		kept.append(player)
 		_pending_history.append(HistoryStoreScript.snapshot(player, season))
+	# Do not retain discarded profiles in the session's retired_players buffer either.
+	retired.assign(kept)
 	return _flush_history()
 
 
 func _flush_history() -> Dictionary:
+	for unit in units:
+		if int(unit.get("history_archived_season", 0)) == season_number or int(unit.get("id", 0)) < 1:
+			continue
+		if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
+			continue
+		if (unit.get("matches", []) as Array).is_empty() or not PlayoffManagerScript.is_unit_season_complete(unit):
+			continue
+		_pending_history.append({"kind": "tournament_season", "unit_id": int(unit["id"]), "season": season_number, "unit": TournamentHistory.snapshot(unit, season_number)})
+		unit["history_archived_season"] = season_number
 	if _pending_history.is_empty():
 		return DbResult.ok({"history_head": history_head})
 	var written: Dictionary = SaveStoreScript.new().append_history(history_head, _pending_history)
@@ -1731,6 +2002,52 @@ func _flush_history() -> Dictionary:
 		history_head = int(written["data"]["history_head"])
 		_pending_history.clear()
 	return written
+
+
+func get_tournament_season(unit_id: int, season: int) -> Dictionary:
+	for unit in units:
+		if int(unit.get("id", 0)) == unit_id and season == season_number:
+			return DbResult.ok(TournamentHistory.snapshot(unit, season))
+	for record in _pending_history:
+		if str(record.get("kind", "")) == "tournament_season" and int(record.get("unit_id", 0)) == unit_id and int(record.get("season", 0)) == season:
+			return DbResult.ok(record["unit"].duplicate(true))
+	return SaveStoreScript.new().tournament_season(history_head, unit_id, season)
+
+
+## All editions of this tournament, including the live season. Club splits stay inside the bag.
+func career_player_stats(unit: Dictionary) -> Dictionary:
+	var unit_id := int(unit.get("id", 0))
+	var pending := _pending_stat_bags(unit_id)
+	var key := "%d:%d:%d" % [history_head, unit_id, pending.size()]
+	if _career_stats_cache_key != key:
+		var loaded := SaveStoreScript.new().tournament_stat_bags(history_head, unit_id, season_number)
+		if not loaded.get("success", false):
+			return {"ok": false, "error": str(loaded.get("error", "Не удалось прочитать архив турнира")), "bag": {}}
+		var bags: Array = loaded.get("data", [])
+		bags.append_array(pending)
+		_career_stats_history = UnitSeasonStatsScript.combine(bags)
+		_career_stats_cache_key = key
+	var bag := UnitSeasonStatsScript.combine([
+		_career_stats_history,
+		UnitSeasonStatsScript.ensure(unit),
+	])
+	return {"ok": true, "bag": bag}
+
+
+func _pending_stat_bags(unit_id: int) -> Array:
+	var bags: Array = []
+	for record in _pending_history:
+		if typeof(record) != TYPE_DICTIONARY or str(record.get("kind", "")) != "tournament_season":
+			continue
+		if int(record.get("unit_id", 0)) != unit_id or int(record.get("season", 0)) == season_number:
+			continue
+		var snap: Variant = record.get("unit", {})
+		if typeof(snap) != TYPE_DICTIONARY:
+			continue
+		var bag: Variant = (snap as Dictionary).get(UnitSeasonStatsScript.KEY, {})
+		if typeof(bag) == TYPE_DICTIONARY and not (bag as Dictionary).is_empty():
+			bags.append(bag)
+	return bags
 
 
 func _prepare_legacy_history(slot: String, payload: Dictionary) -> Dictionary:
@@ -1827,8 +2144,40 @@ func _max_player_id() -> int:
 
 func _max_coach_id() -> int:
 	var max_id := 0
+	for team in national_teams.values():
+		max_id = maxi(max_id, int((team.get("coach", {}) as Dictionary).get("id", 0)))
 	for club_id in coaches_by_club.keys():
 		var coach: Variant = coaches_by_club[club_id]
 		if typeof(coach) == TYPE_DICTIONARY:
 			max_id = maxi(max_id, int(coach.get("id", 0)))
+	for pool in ["free", "retired"]:
+		for coach in coach_market.get(pool, []):
+			max_id = maxi(max_id, int(coach.get("id", 0)))
 	return max_id
+
+
+func _migrate_twenty_player_rosters() -> void:
+	for club_id in players_by_club:
+		var source: Array=players_by_club[club_id].duplicate()
+		source.sort_custom(func(a: Dictionary,b: Dictionary) -> bool:
+			if int(a.get("current_ability",0))==int(b.get("current_ability",0)): return int(a.id)<int(b.id)
+			return int(a.get("current_ability",0))>int(b.get("current_ability",0)))
+		var chosen: Array=[]
+		var seen := {}
+		for position in PlayerTypes.POSITIONS:
+			var need := PlayerTypes.squad_slot_min(position)
+			for player in source:
+				if need<=0: break
+				if str(player.position)==position and not seen.has(int(player.id)):
+					chosen.append(player); seen[int(player.id)]=true; need-=1
+		for player in source:
+			if not seen.has(int(player.id)) and PlayerTypes.can_add_squad_position(chosen,str(player.position)):
+				chosen.append(player); seen[int(player.id)]=true
+		var reserve: Array=reserve_players_by_club.get(club_id,[])
+		for player in source:
+			if not seen.has(int(player.id)):
+				player.is_reserve=true
+				player.is_youth=false
+				reserve.append(player)
+		players_by_club[club_id]=chosen
+		reserve_players_by_club[club_id]=reserve

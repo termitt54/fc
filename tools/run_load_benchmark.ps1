@@ -63,8 +63,8 @@ if ($TestScene) {
     if ($LASTEXITCODE -ne 0) { throw "Regression failed ($LASTEXITCODE)." }
     $benchmarkRegressionErrors = Select-String -LiteralPath (Join-Path $benchmarkRuntime 'regression.log') -Pattern 'SCRIPT ERROR:|ERROR:'
     foreach ($benchmarkRegressionError in $benchmarkRegressionErrors) {
-        # This test deliberately makes SQLite reject INSERT and COMMIT to verify rollback.
-        $benchmarkExpectedSqlFault = $TestScene -eq 'res://tests/game/test_save_history.tscn' -and $benchmarkRegressionError.Line -match '^ERROR:  --> SQL error: (forced history failure|forced save failure|FOREIGN KEY constraint failed)$'
+        # History tests deliberately reject writes to verify rollback and retry.
+        $benchmarkExpectedSqlFault = ($TestScene -eq 'res://tests/game/test_save_history.tscn' -and $benchmarkRegressionError.Line -match '^ERROR:  --> SQL error: (forced history failure|forced save failure|FOREIGN KEY constraint failed)$') -or ($TestScene -eq 'res://tests/game/test_tournament_history.tscn' -and $benchmarkRegressionError.Line -match '^ERROR:  --> SQL error: forced tournament failure$')
         if (!$benchmarkExpectedSqlFault) { throw 'Regression reported unexpected Godot errors; inspect regression.log.' }
     }
     return

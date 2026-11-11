@@ -96,11 +96,7 @@ static func generate_for_club(
 		"overall": current_ability,
 		"contract_years": contract_years,
 		"wage": wage,
-		"style": str(tactics.get("style", CoachTypesScript.STYLE_BALANCED)),
-		"primary_style": str(tactics.get("primary_style", "")),
-		"backup_style": str(tactics.get("backup_style", "")),
-		"primary_formation": str(tactics.get("primary_formation", "")),
-		"backup_formation": str(tactics.get("backup_formation", "")),
+		"style": str(tactics.get("style", CoachTypesScript.STYLE_ATTACKING)),
 		"attributes": attributes,
 		"development_factor": PlayerDevelopmentScript.roll_development_factor(rng),
 		"career": [{

@@ -1,0 +1,10 @@
+from pathlib import Path
+root = Path(Dir(".").abspath).parent
+cpp = str(root / "tools" / ".native-runtime" / "godot-cpp")
+library_name = ARGUMENTS.pop("library_name", "fc_sim_core_v5_attraction")
+env = SConscript(cpp + "/SConstruct")
+env.Append(CPPPATH=["src"])
+env.Append(CXXFLAGS=["-ffp-contract=off", "-fno-fast-math", "-std=c++20"])
+sources = Glob("src/*.cpp")
+lib = env.SharedLibrary(str(root / "addons" / "fc_sim_core" / "bin" / library_name) + env["suffix"] + env["SHLIBSUFFIX"], source=sources)
+Default(lib)

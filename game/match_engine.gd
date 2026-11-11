@@ -3,11 +3,10 @@ extends RefCounted
 ## 8v8 match engine. Two 25-minute halves; playoffs add extra time and a
 ## penalty shootout decided by the taker and the keeper.
 ##
-## Every attack is a duel. The creator against the defender, the finisher
-## against the keeper. Equal players produce the slider rate; a skill gap
-## moves that rate. A red card takes the player off and weakens the side
-## for every phase after it. The coach's tactics and motivation shape how
-## well the same players execute.
+## Possession moves between individual actors on a 60 x 40 m pitch.
+## ActionPitch resolves movement, passing, first touch, duels, shots and saves.
+## Only the current eight players on each side can act. CA, PA, reputation,
+## summed team ratings and the unused bench cannot generate chances or goals.
 ##
 ## The engine never mutates players: it returns per-player entries and the caller
 ## applies condition, morale, cards and injuries.
@@ -26,6 +25,14 @@ const SIDE_AWAY := "away"
 
 
 static func simulate(config: Dictionary, rng: RandomNumberGenerator) -> Dictionary:
+	# Migration is deterministic and uses its own seed, never the match RNG.
+	# Normalise before choosing a backend so old saves also use the fast path.
+	for side in ["home","away"]:
+		var spec: Dictionary=config.get(side,{})
+		TacticTypesScript.ensure_coach_tactics(spec.get("coach",{}))
+	var native: Variant = NativeSimulation.core()
+	if native != null and NativeSimulation.supports_match(config):
+		return native.simulate(config,rng,MatchSimConfigScript.fingerprint())
 	if rng == null:
 		rng = RandomNumberGenerator.new()
 		rng.randomize()
@@ -40,19 +47,18 @@ static func simulate(config: Dictionary, rng: RandomNumberGenerator) -> Dictiona
 	var knobs := MatchSimConfigScript.snapshot()
 	var home_lineup := _select_lineup(home_spec, rng, away_spec)
 	var away_lineup := _select_lineup(away_spec, rng, home_spec)
-	var home_ability := _lineup_ability(home_lineup)
-	var away_ability := _lineup_ability(away_lineup)
 
-	var home := _build_team(SIDE_HOME, home_spec, home_lineup, home_ability, away_ability, rng, knobs)
-	var away := _build_team(SIDE_AWAY, away_spec, away_lineup, away_ability, home_ability, rng, knobs)
+	var home := _build_team(SIDE_HOME, home_spec, home_lineup, 0.0, 0.0, rng, knobs)
+	var away := _build_team(SIDE_AWAY, away_spec, away_lineup, 0.0, 0.0, rng, knobs)
 
 	var ctx := {
 		"rng": rng,
 		"discipline": discipline,
 		"importance": importance,
 		"events": [],
+		"trace_actions": bool(config.get("trace_actions", false)),
 		"knobs": knobs,
-		"home_bonus": 0.0 if neutral else _home_bonus(home_spec, knobs),
+		"home_bonus": 0.0,
 	}
 
 	for phase in MatchTypesScript.REGULAR_PHASES:
@@ -93,7 +99,11 @@ static func simulate(config: Dictionary, rng: RandomNumberGenerator) -> Dictiona
 	_award_motm(home, away)
 
 	return {
+		"engine": "individual-spatial-v3",
+		"pitch": {"length_m":60.0,"width_m":40.0,"goal_width_m":5.0,"goal_height_m":2.0,"offside":false},
 		"home_goals": home_goals,
+		"settings_version": MatchSimConfigScript.CONFIG_VERSION,
+		"settings_fingerprint": MatchSimConfigScript.fingerprint(),
 		"away_goals": away_goals,
 		"winner": winner,
 		"extra_time": extra_time,
@@ -116,15 +126,15 @@ static func _build_team(
 	side: String,
 	spec: Dictionary,
 	lineup: Dictionary,
-	own_ability: float,
-	opponent_ability: float,
+	_own_ability: float,
+	_opponent_ability: float,
 	rng: RandomNumberGenerator,
 	knobs: Dictionary
 ) -> Dictionary:
 	var coach: Dictionary = spec.get("coach", {})
 	var style := str(lineup.get("style", TacticTypesScript.STYLE_CONTROL))
-	var profile: Dictionary = MatchTypesScript.style_profile(style)
-	var gap := clampf((opponent_ability - own_ability) / 100.0, -0.4, 0.4)
+	var profile: Dictionary = Coaching.profile(style, "normal", false)
+	var gap := 0.0
 
 	var team := {
 		"side": side,
@@ -149,12 +159,16 @@ static func _build_team(
 		"profile": profile,
 		"intensity": float(profile.get("intensity", 1.0)),
 		"motivation": _coach_attr(coach, CoachTypes.ATTR_MOTIVATION),
+		"coach_influence": float(knobs.get("coach_influence", 1.0)),
 		"tactics": _coach_attr(coach, CoachTypes.ATTR_TACTICS),
-		"ability": own_ability,
+		"ability": 0.0,
+		"starting_ability": 0.0,
+		"starting_condition": 0.0,
+		"starting_keeper": {},
 		"discipline_skill": _coach_attr(coach, CoachTypes.ATTR_DISCIPLINE),
 		"on_field": [],
 		"bench": lineup.get("bench", []),
-		"subs_left": MatchTypesScript.SUBS_MAX,
+		"subs_left": int(knobs.get("subs_max", MatchTypesScript.SUBS_MAX)),
 		"entries": [],
 		"by_id": {},
 		"goals": 0,
@@ -171,6 +185,13 @@ static func _build_team(
 	for record in lineup.get("starters", []):
 		var unit := _make_unit(record["player"], str(record["slot"]), float(record["fit"]), team, gap, rng, 0)
 		team["on_field"].append(unit)
+		team["starting_condition"] += PlayerConditionScript.condition_of(record["player"])
+		if str(record["slot"]) == "GK":
+			team["starting_keeper"] = {"player_id": int(record["player"].get("id", 0)),
+				"ability": 0.0,
+				"condition": PlayerConditionScript.condition_of(record["player"]),
+				"native": bool(unit["ratings"].get("is_gk", false))}
+	team["starting_condition"] /= maxi((team["on_field"] as Array).size(), 1)
 	return team
 
 
@@ -188,28 +209,8 @@ static func _make_unit(
 	team["entries"].append(entry)
 	team["by_id"][int(player.get("id", 0))] = entry
 
-	var morale := MatchTypesScript.morale_multiplier(PlayerConditionScript.morale_of(player))
-	var form := 1.0
-	# Facing a clearly stronger side rattles everyone except the fearless.
-	if ability_gap > 0.0 and not bool(ratings.get("fearless", false)):
-		form -= ability_gap * (0.12 - 0.06 * float(ratings.get("pressure", 0.5)))
-	# Motivation 10 is neutral. 20 pulls the squad up, 1 leaves ability on the bench.
-	var motivation_boost := 0.92 + 0.16 * (float(team["motivation"]) / 20.0)
-
-	# The collective day is part of every duel, not just of the chance count.
-	var base := fit * form * morale * motivation_boost * float(team["form"])
-	var attack := 0.52 * float(ratings.get("finish", 0.4)) \
-		+ 0.28 * float(ratings.get("off_ball", 0.4)) \
-		+ 0.20 * float(ratings.get("dribble", 0.4))
-	var control := 0.62 * float(ratings.get("create", 0.4)) + 0.38 * float(ratings.get("press", 0.4))
-	var defence := 0.72 * float(ratings.get("defend", 0.4)) + 0.28 * float(ratings.get("press", 0.4))
-	if bool(ratings.get("is_gk", false)):
-		defence = 0.5 * float(ratings.get("gk_stop", 0.4)) + 0.5 * float(ratings.get("gk_aerial", 0.4))
-
 	var role: Dictionary = MatchTypesScript.slot_role(slot)
 	var role_att := float(role.get("att", 0.0))
-	var role_ctrl := float(role.get("ctrl", 0.0))
-	var role_def := float(role.get("def", 0.0))
 	return {
 		"player": player,
 		"entry": entry,
@@ -217,17 +218,7 @@ static func _make_unit(
 		"slot": slot,
 		"role": role,
 		"role_att": role_att,
-		"role_ctrl": role_ctrl,
-		"role_def": role_def,
-		# Role weight already folded in: the phase loop only scales by freshness.
-		"w_att": attack * base * role_att,
-		"w_ctrl": control * base * role_ctrl,
-		"w_def": defence * base * role_def,
 		"fit": fit,
-		"base": base,
-		"attack": attack * base,
-		"control": control * base,
-		"defence": defence * base,
 		"fresh": MatchSimConfigScript.condition_play_mult(PlayerConditionScript.condition_of(player)),
 		"drain": _drain_per_phase(ratings, player, team),
 		"on_since": minute,
@@ -237,6 +228,16 @@ static func _make_unit(
 
 
 static func _drain_per_phase(_ratings: Dictionary, player: Dictionary, team: Dictionary) -> float:
+	if not team.has("_drain_cache"):
+		team["_drain_cache"] = {}
+	var cache: Dictionary = team["_drain_cache"]
+	var id := int(player.get("id", 0))
+	var intensity := float(team["intensity"])
+	if not cache.has(id):
+		cache[id] = {}
+	var by_intensity: Dictionary = cache[id]
+	if id > 0 and by_intensity.has(intensity):
+		return float(by_intensity[intensity])
 	var remain := clampf(
 		MatchSimConfigScript.curve_attr(
 			PlayerTypes.stamina_of(player),
@@ -250,7 +251,10 @@ static func _drain_per_phase(_ratings: Dictionary, player: Dictionary, team: Dic
 	var base := (1.0 - remain) / float(MatchTypesScript.REGULAR_PHASES)
 	var condition := float(PlayerConditionScript.condition_of(player)) / float(MatchTypesScript.CONDITION_MAX)
 	var age_factor := 1.0 + 0.010 * float(maxi(int(player.get("age", 25)) - 30, 0))
-	return base * float(team["intensity"]) * (1.35 - 0.35 * condition) * age_factor
+	var drain := base * intensity * (1.35 - 0.35 * condition) * age_factor \
+		* PlayerConditionScript.match_workload_factor(player)
+	by_intensity[intensity] = drain
+	return drain
 
 
 static func _new_entry(player: Dictionary, slot: String, started: bool) -> Dictionary:
@@ -298,282 +302,23 @@ static func _run_phase(
 	var rng: RandomNumberGenerator = ctx["rng"]
 	_review_coaching(home, away, minute_start, ctx)
 	_review_coaching(away, home, minute_start, ctx)
-	_build_wheels(home)
-	_build_wheels(away)
-
-	var home_ctrl := float(home["ctrl_power"]) * float(home["profile"].get("ctrl", 1.0))
-	var away_ctrl := float(away["ctrl_power"]) * float(away["profile"].get("ctrl", 1.0))
-	var total_ctrl := home_ctrl + away_ctrl
-	var home_share := 0.5 if total_ctrl <= 0.0 else home_ctrl / total_ctrl
-	home["possession_sum"] = float(home["possession_sum"]) + home_share
-	away["possession_sum"] = float(away["possession_sum"]) + (1.0 - home_share)
+	load("res://game/action_pitch.gd").play(home, away, ctx, minute_start, extra)
 	home["phases"] = int(home["phases"]) + 1
 	away["phases"] = int(away["phases"]) + 1
 	home["intensity_sum"] = float(home["intensity_sum"]) + float(home["intensity"])
 	away["intensity_sum"] = float(away["intensity_sum"]) + float(away["intensity"])
+	var fatigue_scale := 1.35 if extra else 1.0
+	_roll_discipline(home, ctx, minute_start+5)
+	_roll_discipline(away, ctx, minute_start+5)
+	_roll_injuries(home, ctx, minute_start+5, fatigue_scale)
+	_roll_injuries(away, ctx, minute_start+5, fatigue_scale)
 
-	var fatigue_scale := 1.0 if not extra else 1.35
-	var home_exp := _chance_expectation(home, away, home_share, float(ctx["home_bonus"]), ctx)
-	var away_exp := _chance_expectation(away, home, 1.0 - home_share, 0.0, ctx)
-	if extra:
-		home_exp *= 0.9
-		away_exp *= 0.9
 
-	var order_home_first := rng.randf() < home_share
-	if order_home_first:
-		_run_attacks(home, away, home_exp, phase, minute_start, ctx)
-		_run_attacks(away, home, away_exp, phase, minute_start, ctx)
-	else:
-		_run_attacks(away, home, away_exp, phase, minute_start, ctx)
-		_run_attacks(home, away, home_exp, phase, minute_start, ctx)
-
-	_roll_discipline(home, ctx, minute_start)
-	_roll_discipline(away, ctx, minute_start)
-	_roll_injuries(home, ctx, minute_start, fatigue_scale)
-	_roll_injuries(away, ctx, minute_start, fatigue_scale)
-
-	_apply_fatigue(home, fatigue_scale)
-	_apply_fatigue(away, fatigue_scale)
 
 	var minute_end := minute_start + MatchTypesScript.PHASE_MINUTES
-	if phase + 1 >= MatchTypesScript.SUBS_FATIGUE_PHASE_FROM:
+	if minute_end >= int(ctx["knobs"].get("subs_first_minute", 25)) and minute_end != MatchTypesScript.REGULAR_MINUTES and minute_end < MatchTypesScript.REGULAR_MINUTES + MatchTypesScript.ET_MINUTES:
 		_consider_fatigue_subs(home, away, ctx, minute_end)
 		_consider_fatigue_subs(away, home, ctx, minute_end)
-
-
-static func _build_wheels(team: Dictionary) -> void:
-	var att_w := PackedFloat32Array()
-	var ctrl_w := PackedFloat32Array()
-	var def_w := PackedFloat32Array()
-	var att_power := 0.0
-	var ctrl_power := 0.0
-	var def_power := 0.0
-	var att_weight := 0.0
-	var def_weight := 0.0
-	var ctrl_weight := 0.0
-	var effective_ability := 0.0
-
-	for unit in team["on_field"]:
-		var fresh := float(unit["fresh"])
-		effective_ability += float(unit["ratings"].get("ability", 0.5)) * 100.0 \
-			* float(unit["fit"]) * fresh
-		var a_val := float(unit["w_att"]) * fresh
-		var c_val := float(unit["w_ctrl"]) * fresh
-		var d_val := float(unit["w_def"]) * fresh
-		att_w.append(a_val)
-		ctrl_w.append(c_val)
-		def_w.append(d_val)
-		att_power += a_val
-		ctrl_power += c_val
-		def_power += d_val
-		att_weight += float(unit["role_att"])
-		ctrl_weight += float(unit["role_ctrl"])
-		def_weight += float(unit["role_def"])
-
-	team["att_wheel"] = att_w
-	team["ctrl_wheel"] = ctrl_w
-	team["def_wheel"] = def_w
-	team["att_total"] = att_power
-	team["ctrl_total"] = ctrl_power
-	team["def_total"] = def_power
-	team["att_norm"] = 0.0 if att_weight <= 0.0 else att_power / att_weight
-	team["ctrl_power"] = 0.0 if ctrl_weight <= 0.0 else ctrl_power / ctrl_weight
-	team["def_norm"] = 0.0 if def_weight <= 0.0 else def_power / def_weight
-	# Headcount is handled separately by men_down; do not penalise it twice here.
-	var count := (team["on_field"] as Array).size()
-	team["ability"] = 0.0 if count == 0 else effective_ability / float(count)
-
-
-static func _chance_expectation(
-	team: Dictionary,
-	opponent: Dictionary,
-	possession: float,
-	home_bonus: float,
-	ctx: Dictionary
-) -> float:
-	var attack := float(team["att_norm"])
-	var defence := maxf(float(opponent["def_norm"]), 0.05)
-	var knobs: Dictionary = ctx.get("knobs", {})
-	var ratio := pow(
-		clampf(
-			attack / defence,
-			MatchTypesScript.QUALITY_RATIO_MIN,
-			MatchTypesScript.QUALITY_RATIO_MAX
-		),
-		float(knobs.get("quality_exponent", MatchTypesScript.QUALITY_EXPONENT))
-	)
-	var tempo := float(team["profile"].get("tempo", 1.0))
-	var concede := float(opponent["profile"].get("concede", 1.0))
-	var share := 0.5 + possession
-	var man_down := float(knobs.get("man_down_penalty", MatchTypesScript.MAN_DOWN_PENALTY))
-	var men_down := 1.0 - man_down * float(opponent["men_down"])
-	var own_down := 1.0 - man_down * float(team["men_down"])
-	var expectation := float(knobs.get("chances_per_phase", MatchTypesScript.CHANCES_PER_PHASE)) \
-		* ratio * _squad_factor(team, opponent) * _coach_factor(team, opponent) \
-		* tempo * concede * share
-	expectation *= (1.0 + home_bonus) * own_down / maxf(men_down, 0.4)
-	return clampf(expectation, 0.04, 1.65)
-
-
-static func _run_attacks(
-	team: Dictionary,
-	opponent: Dictionary,
-	expectation: float,
-	_phase: int,
-	minute_start: int,
-	ctx: Dictionary
-) -> void:
-	var rng: RandomNumberGenerator = ctx["rng"]
-	var knobs: Dictionary = ctx.get("knobs", {})
-	var count := _sample_poisson(expectation, rng)
-	for _i in count:
-		var minute := minute_start + rng.randi_range(1, MatchTypesScript.PHASE_MINUTES)
-		var set_piece := rng.randf() < float(knobs.get("set_piece_share", MatchTypesScript.SET_PIECE_SHARE))
-		_resolve_chance(team, opponent, ctx, minute, set_piece)
-	if rng.randf() < float(knobs.get("penalty_per_phase", MatchTypesScript.PENALTY_PER_PHASE)):
-		_resolve_penalty(team, opponent, ctx, minute_start + rng.randi_range(1, MatchTypesScript.PHASE_MINUTES))
-
-
-static func _resolve_chance(
-	team: Dictionary,
-	opponent: Dictionary,
-	ctx: Dictionary,
-	minute: int,
-	set_piece: bool
-) -> void:
-	var rng: RandomNumberGenerator = ctx["rng"]
-	var creator_index := _pick_weighted(team["ctrl_wheel"], float(team["ctrl_total"]), rng)
-	if creator_index < 0:
-		return
-	var creator: Dictionary = team["on_field"][creator_index]
-	var defender_index := _pick_weighted(opponent["def_wheel"], float(opponent["def_total"]), rng)
-	if defender_index < 0:
-		return
-	var defender: Dictionary = opponent["on_field"][defender_index]
-
-	var creator_ratings: Dictionary = creator["ratings"]
-	var defender_ratings: Dictionary = defender["ratings"]
-	var creator_fresh := float(creator["fresh"])
-
-	var creation := 0.0
-	if set_piece:
-		creation = float(creator_ratings.get("set_piece", 0.4)) * float(creator["base"])
-	else:
-		creation = (
-			0.62 * float(creator_ratings.get("create", 0.4))
-			+ 0.38 * float(creator_ratings.get("dribble", 0.4))
-		) * float(creator["base"]) * creator_fresh
-
-	var resistance := float(defender_ratings.get("defend", 0.4)) * float(defender["base"]) * float(defender["fresh"])
-	if set_piece:
-		resistance = float(defender_ratings.get("aerial", 0.4)) * float(defender["base"]) * 0.9
-
-	var knobs: Dictionary = ctx.get("knobs", {})
-	creation = _touch(creation, creator, rng, knobs)
-	resistance = _touch(resistance, defender, rng, knobs)
-	var edge := creation - resistance + _coach_edge(team)
-	# The slider is the rate when the two players are equal. The gap between
-	# them is what moves the chance, not a coin flip beside their attributes.
-	var p_create := clampf(
-		float(knobs.get("chance_create_base", MatchTypesScript.CHANCE_CREATE_BASE)) + 0.45 * edge,
-		0.04,
-		0.96
-	)
-	if rng.randf() >= p_create:
-		return
-
-	var shooter_index := creator_index
-	var solo := set_piece == false and _takes_it_himself(creator, rng)
-	if not solo:
-		shooter_index = _pick_weighted(team["att_wheel"], float(team["att_total"]), rng)
-		if shooter_index < 0 or shooter_index == creator_index:
-			shooter_index = creator_index
-			solo = true
-	var shooter: Dictionary = team["on_field"][shooter_index]
-	var shooter_ratings: Dictionary = shooter["ratings"]
-
-	team["shots"] = int(team["shots"]) + 1
-
-	var quality := clampf(
-		0.50 + 0.85 * edge + (float(team["profile"].get("quality", 1.0)) - 1.0),
-		0.05,
-		1.0
-	)
-	var finishing := float(shooter_ratings.get("finish", 0.4))
-	if set_piece:
-		finishing = maxf(finishing, float(shooter_ratings.get("aerial", 0.4)) * 0.9)
-	finishing *= float(shooter["base"]) * float(shooter["fresh"])
-	finishing = _touch(finishing, shooter, rng, knobs)
-
-	var on_target := clampf(
-		float(knobs.get("shot_on_target_base", MatchTypesScript.SHOT_ON_TARGET_BASE))
-			+ 0.45 * (finishing - 0.5) + 0.16 * (quality - 0.5),
-		0.06,
-		0.95
-	)
-	if rng.randf() >= on_target:
-		return
-	team["on_target"] = int(team["on_target"]) + 1
-
-	var keeper: Dictionary = _keeper_of(opponent)
-	var keeper_skill := 0.42
-	if not keeper.is_empty():
-		keeper_skill = float((keeper["ratings"] as Dictionary).get("gk_stop", 0.42)) \
-			* float(keeper["base"]) * float(keeper["fresh"])
-
-	var clutch := 0.0
-	if bool(shooter_ratings.get("ice_cold", false)) and minute >= 40:
-		clutch = 0.035
-	var conversion := clampf(
-		float(knobs.get("shot_conversion_base", MatchTypesScript.SHOT_CONVERSION_BASE))
-			+ 0.42 * (finishing - keeper_skill)
-			+ 0.22 * (quality - 0.5)
-			+ clutch,
-		0.02,
-		0.90
-	)
-
-	if rng.randf() < conversion:
-		_score_goal(team, opponent, shooter, creator if not solo else {}, ctx, minute, MatchTypesScript.EVENT_GOAL)
-	elif not keeper.is_empty():
-		var keeper_entry: Dictionary = keeper["entry"]
-		keeper_entry["saves"] = int(keeper_entry["saves"]) + 1
-
-
-static func _resolve_penalty(team: Dictionary, opponent: Dictionary, ctx: Dictionary, minute: int) -> void:
-	var rng: RandomNumberGenerator = ctx["rng"]
-	var taker := _best_on_field(team, "penalty")
-	if taker.is_empty():
-		return
-	var keeper := _keeper_of(opponent)
-	var taker_ratings: Dictionary = taker["ratings"]
-	var skill := float(taker_ratings.get("penalty", 0.5))
-	if bool(taker_ratings.get("ice_cold", false)):
-		skill += 0.06
-	var keeper_skill := 0.45
-	if not keeper.is_empty():
-		keeper_skill = float((keeper["ratings"] as Dictionary).get("gk_penalty", 0.45))
-	var knobs: Dictionary = ctx.get("knobs", {})
-	var chance := clampf(
-		float(knobs.get("penalty_conversion_base", MatchTypesScript.PENALTY_CONVERSION_BASE))
-			+ 0.30 * (skill - 0.5) - 0.22 * (keeper_skill - 0.5),
-		0.45,
-		0.95
-	)
-	var entry: Dictionary = taker["entry"]
-	team["shots"] = int(team["shots"]) + 1
-	if rng.randf() < chance:
-		team["on_target"] = int(team["on_target"]) + 1
-		entry["pen_scored"] = int(entry["pen_scored"]) + 1
-		_score_goal(team, opponent, taker, {}, ctx, minute, MatchTypesScript.EVENT_PENALTY_GOAL)
-		return
-	entry["pen_missed"] = int(entry["pen_missed"]) + 1
-	if not keeper.is_empty() and rng.randf() < 0.55:
-		team["on_target"] = int(team["on_target"]) + 1
-		var keeper_entry: Dictionary = keeper["entry"]
-		keeper_entry["saves"] = int(keeper_entry["saves"]) + 1
-		keeper_entry["pen_saved"] = int(keeper_entry["pen_saved"]) + 1
-	_log(ctx, minute, MatchTypesScript.EVENT_PENALTY_MISS, team, entry)
 
 
 static func _score_goal(
@@ -583,16 +328,24 @@ static func _score_goal(
 	assistant: Dictionary,
 	ctx: Dictionary,
 	minute: int,
-	event_type: String
+	event_type: String,
+	secondary: Dictionary = {}
 ) -> void:
 	team["goals"] = int(team["goals"]) + 1
 	var entry: Dictionary = scorer["entry"]
 	entry["goals"] = int(entry["goals"]) + 1
 	var assist_name := ""
-	if not assistant.is_empty():
-		var assist_entry: Dictionary = assistant["entry"]
-		assist_entry["assists"] = int(assist_entry["assists"]) + 1
-		assist_name = str(assist_entry["name"])
+	var assist_ids: Array=[]
+	var assist_names: Array=[]
+	for helper in [assistant,secondary]:
+		if helper.is_empty(): continue
+		var ae: Dictionary=helper.entry
+		var id := int(ae.player_id)
+		if id==int(entry.player_id) or id in assist_ids: continue
+		ae.assists=int(ae.assists)+1
+		assist_ids.append(id)
+		assist_names.append(str(ae.name))
+	assist_name=", ".join(assist_names)
 	var keeper := _keeper_of(opponent)
 	if not keeper.is_empty():
 		var keeper_entry: Dictionary = keeper["entry"]
@@ -600,21 +353,8 @@ static func _score_goal(
 	var event := _log(ctx, minute, event_type, team, entry)
 	if not assist_name.is_empty():
 		event["assist"] = assist_name
-
-
-static func _takes_it_himself(unit: Dictionary, rng: RandomNumberGenerator) -> bool:
-	var ratings: Dictionary = unit["ratings"]
-	var role: Dictionary = unit["role"]
-	var base := 0.16 + 0.22 * float(role.get("att", 0.0))
-	if bool(ratings.get("individualist", false)):
-		base += 0.16
-	if bool(ratings.get("team_player", false)):
-		base -= 0.09
-	base += 0.10 * (float(ratings.get("ego", 0.5)) - 0.5)
-	return rng.randf() < clampf(base, 0.03, 0.62)
-
-
-# --- discipline, injuries, substitutions ---------------------------------
+	event.assist_ids=assist_ids
+	event.assist_names=assist_names
 
 
 static func _roll_discipline(team: Dictionary, ctx: Dictionary, minute: int) -> void:
@@ -636,7 +376,6 @@ static func _roll_discipline(team: Dictionary, ctx: Dictionary, minute: int) -> 
 	if offender.is_empty():
 		return
 	var entry: Dictionary = offender["entry"]
-	team["fouls"] = int(team["fouls"]) + 1
 
 	if rng.randf() < float(knobs.get("red_direct_share", MatchTypesScript.RED_DIRECT_SHARE)):
 		entry["red"] = 1
@@ -666,6 +405,7 @@ static func _pick_offender(team: Dictionary, rng: RandomNumberGenerator) -> Dict
 		if bool(ratings.get("is_gk", false)):
 			risk *= 0.2
 		risk *= 1.0 + 0.5 * (1.0 - float(unit["fresh"]))
+		risk *= float(unit.get("phase_fouls",0))
 		weights.append(risk)
 		total += risk
 	var index := _pick_weighted(weights, total, rng)
@@ -680,7 +420,30 @@ static func _send_off(team: Dictionary, unit: Dictionary, ctx: Dictionary, minut
 	_close_unit(unit, minute)
 	team["on_field"].erase(unit)
 	team["men_down"] = int(team["men_down"]) + 1
-	_build_wheels(team)
+	if str(unit["slot"]) == "GK":
+		_replace_dismissed_keeper(team, ctx, minute)
+
+
+static func _replace_dismissed_keeper(team: Dictionary, ctx: Dictionary, minute: int) -> void:
+	if int(team["subs_left"]) <= 0:
+		return
+	var has_keeper := false
+	for candidate in team["bench"]:
+		if bool(MatchRatings.of(candidate).get("is_gk", false)):
+			has_keeper = true
+			break
+	if not has_keeper:
+		return
+	# Sacrifice the least defensive outfield role, preserving the numerical loss.
+	var outgoing: Dictionary = {}
+	var defensive_value := INF
+	for player_unit in team["on_field"]:
+		var value := float(player_unit.ratings.get("defend",0.5))*float(player_unit.role.get("def",0.0))*float(player_unit.fresh)
+		if value < defensive_value:
+			defensive_value = value
+			outgoing = player_unit
+	if not outgoing.is_empty():
+		_substitute(team, outgoing, ctx, minute, true, "goalkeeper_dismissal", "GK")
 
 
 static func _roll_injuries(team: Dictionary, ctx: Dictionary, minute: int, fatigue_scale: float) -> void:
@@ -694,8 +457,6 @@ static func _roll_injuries(team: Dictionary, ctx: Dictionary, minute: int, fatig
 		var player: Dictionary = unit["player"]
 		var risk := 0.5 + 1.4 * (1.0 - float(unit["fresh"]))
 		risk += 0.04 * float(maxi(int(player.get("age", 25)) - 29, 0))
-		if bool((unit["ratings"] as Dictionary).get("professional", false)):
-			risk *= 0.85
 		weights.append(risk)
 		total += risk
 	var index := _pick_weighted(weights, total, rng)
@@ -708,35 +469,134 @@ static func _roll_injuries(team: Dictionary, ctx: Dictionary, minute: int, fatig
 	entry["injury_rounds"] = PlayerConditionScript.injury_duration(victim["player"], grade, rng)
 	_log(ctx, minute, MatchTypesScript.EVENT_INJURY, team, entry)
 
+	var replaced := false
 	if int(team["subs_left"]) > 0:
-		_substitute(team, victim, ctx, minute, true)
-	else:
+		replaced = _substitute(team, victim, ctx, minute, true)
+	if not replaced:
 		_close_unit(victim, minute)
 		team["on_field"].erase(victim)
 		team["men_down"] = int(team["men_down"]) + 1
-		_build_wheels(team)
 
 
-static func _consider_fatigue_subs(
-	team: Dictionary,
-	_opponent: Dictionary,
-	ctx: Dictionary,
-	minute: int
-) -> void:
+## Evaluate every outgoing role: a tired player with no suitable cover must not
+## prevent a useful change elsewhere. Never spend the last window early.
+static func _consider_fatigue_subs(team: Dictionary, opponent: Dictionary, ctx: Dictionary, minute: int) -> void:
+	var knobs: Dictionary = ctx["knobs"]
 	if int(team["subs_left"]) < 1 or (team["bench"] as Array).is_empty():
 		return
-	var worst: Dictionary = {}
-	var worst_fresh := 1.0
-	for unit in team["on_field"]:
-		if bool((unit["ratings"] as Dictionary).get("is_gk", false)):
-			continue
-		var fresh := float(unit["fresh"])
-		if fresh < worst_fresh:
-			worst_fresh = fresh
-			worst = unit
-	if worst.is_empty() or worst_fresh > 0.78:
+	if int(team["subs_left"]) == 1 and minute < int(knobs.get("subs_reserve_until", 40)):
 		return
-	_substitute(team, worst, ctx, minute, false)
+	var best: Dictionary = {}
+	var best_id := 0
+	var best_gain := -INF
+	var end_minute := MatchTypesScript.REGULAR_MINUTES if minute < MatchTypesScript.REGULAR_MINUTES else MatchTypesScript.REGULAR_MINUTES + MatchTypesScript.ET_MINUTES
+	var phases := maxf(1.0, float(end_minute-minute)/MatchTypesScript.PHASE_MINUTES)
+	var gain_required := 1.0 + float(knobs.get("subs_min_gain", 0.02))
+	var quality_required := float(knobs.get("subs_min_quality", 0.85))
+	for unit in team["on_field"]:
+		if bool(unit["ratings"].get("is_gk", false)) or minute - int(unit["on_since"]) < 10:
+			continue
+		if float(unit["fresh"]) > float(knobs.get("subs_freshness_threshold", 0.94)):
+			continue
+		var slot := str(unit["slot"])
+		var original := LineupSelectorScript.role_value(unit["ratings"], slot, str(team["style"])) * float(unit["fit"])
+		var current := original * (float(unit["fresh"]) + maxf(0.42,float(unit["fresh"])-float(unit["drain"])*phases)) * 0.5
+		for option in _bench_role_options(team,slot):
+			if team["bench_used"].has(int(option[0])) or float(option[1]) < original * quality_required:
+				continue
+			var incoming := float(option[1]) * (float(option[2])+maxf(0.42,float(option[2])-float(option[3])*phases)) * 0.5
+			if incoming <= current * gain_required:
+				continue
+			var gain := incoming-current
+			if gain > best_gain:
+				best = unit
+				best_id = int(option[0])
+				best_gain = gain
+	if not best.is_empty():
+		var reason := "chasing_score" if int(team["goals"]) < int(opponent["goals"]) else "protect_lead" if int(team["goals"]) > int(opponent["goals"]) else "fatigue"
+		_substitute(team, best, ctx, minute, false, reason, "", best_id, false)
+
+
+## Reuse each bench player's role and running load until the tactical plan changes.
+static func _bench_role_options(team: Dictionary, slot: String) -> Array:
+	if not team.has("bench_used"):
+		team["bench_used"] = {}
+	if not team.has("bench_options_by_style"):
+		team["bench_options_by_style"] = {}
+	var styles: Dictionary = team["bench_options_by_style"]
+	var style := str(team["style"])
+	var intensity := float(team["intensity"])
+	if not styles.has(style):
+		styles[style] = {}
+	var intensities: Dictionary = styles[style]
+	if not intensities.has(intensity):
+		intensities[intensity] = {}
+	var options: Dictionary = intensities[intensity]
+	if not options.has(slot):
+		var slots := [slot]
+		for unit in team["on_field"]:
+			var role := str(unit["slot"])
+			if not options.has(role) and not slots.has(role):
+				slots.append(role)
+		for role in slots:
+			options[role] = []
+		# Prepare each player once for this plan, rather than once for every role.
+		for player in team["bench"]:
+			var prepared := _prepare_bench_player(player, team)
+			var ratings: Dictionary = prepared.ratings
+			for role in slots:
+				if (role == "GK") != bool(ratings.get("is_gk", false)):
+					continue
+				(options[role] as Array).append([player.get("id",0),
+					LineupSelectorScript.role_value(ratings,role,style)*MatchTypesScript.slot_fit(role,str(ratings.get("position","CM"))),
+					prepared.fresh,prepared.drain])
+	return options[slot]
+
+
+static func _remaining_role_value(unit: Dictionary, team: Dictionary, minute: int) -> float:
+	var phases := maxf(1.0, float(MatchTypesScript.REGULAR_MINUTES - minute) / MatchTypesScript.PHASE_MINUTES)
+	if minute >= MatchTypesScript.REGULAR_MINUTES:
+		phases = maxf(1.0, float(MatchTypesScript.REGULAR_MINUTES + MatchTypesScript.ET_MINUTES - minute) / MatchTypesScript.PHASE_MINUTES)
+	var fresh := float(unit["fresh"])
+	var end := maxf(0.42, fresh - float(unit["drain"]) * phases)
+	return LineupSelectorScript.role_value(unit["ratings"], str(unit["slot"]), str(team["style"])) * float(unit["fit"]) * (fresh + end) * 0.5
+
+
+static func _prepare_bench_player(player: Dictionary, team: Dictionary) -> Dictionary:
+	if not team.has("bench_evaluation"):
+		team["bench_evaluation"] = {}
+	var cache: Dictionary = team["bench_evaluation"]
+	var id := int(player.get("id", 0))
+	var prepared: Dictionary = cache.get(id, {})
+	# Bench players do not pay load inside simulate(). Only a changed tactical
+	# intensity/style invalidates their projection; do not rebuild it per pair.
+	if prepared.is_empty() or float(prepared.intensity) != float(team["intensity"]) or str(prepared.style) != str(team["style"]):
+		prepared = {"ratings": MatchRatings.of(player), "intensity": team["intensity"], "style": team["style"], "roles": {},
+			"fresh": MatchSimConfigScript.condition_play_mult(PlayerConditionScript.condition_of(player)),
+			"drain": _drain_per_phase(MatchRatings.of(player), player, team)}
+		cache[id] = prepared
+	return prepared
+
+
+static func _replacement_value(player: Dictionary, slot: String, team: Dictionary, minute: int) -> float:
+	var prepared := _prepare_bench_player(player, team)
+	var ratings: Dictionary = prepared.ratings
+	if (slot == "GK") != bool(ratings.get("is_gk", false)):
+		return -1.0
+	if not prepared.roles.has(slot):
+		prepared.roles[slot] = LineupSelectorScript.role_value(ratings, slot, str(team["style"])) * MatchTypesScript.slot_fit(slot, str(ratings.get("position", "CM")))
+	var end_minute := MatchTypesScript.REGULAR_MINUTES if minute < MatchTypesScript.REGULAR_MINUTES else MatchTypesScript.REGULAR_MINUTES + MatchTypesScript.ET_MINUTES
+	var phases := maxf(1.0, float(end_minute - minute) / MatchTypesScript.PHASE_MINUTES)
+	return float(prepared.roles[slot]) * (float(prepared.fresh) + maxf(0.42, float(prepared.fresh) - float(prepared.drain) * phases)) * 0.5
+
+
+static func _acceptable_replacement(unit: Dictionary, player: Dictionary, slot: String, team: Dictionary, incoming: float, current: float, knobs: Dictionary) -> bool:
+	if incoming <= current * (1.0 + float(knobs.get("subs_min_gain", 0.02))):
+		return false
+	var original := LineupSelectorScript.role_value(unit["ratings"], slot, str(team["style"])) * float(unit["fit"])
+	var ratings := MatchRatings.of(player)
+	var replacement := LineupSelectorScript.role_value(ratings, slot, str(team["style"])) * MatchTypesScript.slot_fit(slot, str(ratings.get("position", "CM")))
+	return replacement >= original * float(knobs.get("subs_min_quality", 0.85))
 
 
 static func _substitute(
@@ -745,37 +605,46 @@ static func _substitute(
 	ctx: Dictionary,
 	minute: int,
 	forced: bool,
-	reason: String = "fatigue"
-) -> void:
+	reason: String = "fatigue",
+	slot_override: String = "",
+	preferred_id: int = 0,
+	refresh_wheels: bool = true
+) -> bool:
 	var bench: Array = team["bench"]
 	if bench.is_empty() or int(team["subs_left"]) < 1:
-		return
-	var slot := str(unit["slot"])
-	var need_gk := bool((unit["ratings"] as Dictionary).get("is_gk", false))
+		return false
+	var knobs: Dictionary = ctx.get("knobs", {})
+	if knobs.is_empty():
+		knobs = MatchSimConfigScript.snapshot()
+	if not forced:
+		if minute < int(knobs.get("subs_first_minute", 25)) or minute == MatchTypesScript.REGULAR_MINUTES or minute >= MatchTypesScript.REGULAR_MINUTES + MatchTypesScript.ET_MINUTES:
+			return false
+		if int(team["subs_left"]) == 1 and minute < int(knobs.get("subs_reserve_until", 40)):
+			return false
+	var slot := slot_override if not slot_override.is_empty() else str(unit["slot"])
+	var need_gk := slot == "GK"
 	var best_index := -1
 	var best_score := -1.0
 	for i in bench.size():
 		var candidate: Dictionary = bench[i]
+		if preferred_id>0 and int(candidate.get("id",0)) != preferred_id:
+			continue
 		var candidate_ratings := MatchRatings.of(candidate)
-		var position := str(candidate_ratings.get("position", PlayerTypes.POS_CM))
 		if need_gk != bool(candidate_ratings.get("is_gk", false)):
 			continue
-		var score := LineupSelectorScript.role_value(candidate_ratings, slot, str(team["style"])) \
-			* MatchTypesScript.slot_fit(slot, position)
-		score *= MatchSimConfigScript.condition_play_mult(PlayerConditionScript.condition_of(candidate))
+		var score := _replacement_value(candidate, slot, team, minute)
+		if not forced and not _acceptable_replacement(unit, candidate, slot, team, score, _remaining_role_value(unit, team, minute), knobs):
+			continue
 		if score > best_score:
 			best_score = score
 			best_index = i
 	if best_index < 0:
-		return
-	if not forced:
-		var current := LineupSelectorScript.role_value(unit["ratings"], slot, str(team["style"])) \
-			* float(unit["fit"]) * float(unit["fresh"])
-		if best_score <= current * 1.02:
-			return
+		return false
 
 	var incoming: Dictionary = bench[best_index]
 	bench.remove_at(best_index)
+	if team.has("bench_used"):
+		team["bench_used"][int(incoming.get("id",0))] = true
 	team["subs_left"] = int(team["subs_left"]) - 1
 
 	_close_unit(unit, minute)
@@ -793,12 +662,12 @@ static func _substitute(
 		(team["on_field"] as Array)[index] = fresh_unit
 	else:
 		(team["on_field"] as Array).append(fresh_unit)
-	_build_wheels(team)
 
 	var event := _log(ctx, minute, MatchTypesScript.EVENT_SUB, team, fresh_unit["entry"])
 	event["out"] = str((unit["entry"] as Dictionary)["name"])
 	event["forced"] = forced
-	event["reason"] = "injury" if forced else reason
+	event["reason"] = "injury" if forced and reason == "fatigue" else reason
+	return true
 
 
 static func _review_coaching(team: Dictionary, opponent: Dictionary, minute: int, ctx: Dictionary) -> void:
@@ -851,15 +720,6 @@ static func _consider_tactical_sub(team: Dictionary, ctx: Dictionary, minute: in
 			(team["decisions"] as Array).append((ctx["events"] as Array).back().duplicate())
 
 
-static func _apply_fatigue(team: Dictionary, scale: float) -> void:
-	for unit in team["on_field"]:
-		unit["fresh"] = maxf(float(unit["fresh"]) - float(unit["drain"]) * scale, 0.42)
-		unit["entry"]["intensity_minutes"] += MatchTypesScript.PHASE_MINUTES * float(team["intensity"])
-
-
-# --- shootout ------------------------------------------------------------
-
-
 static func _run_shootout(home: Dictionary, away: Dictionary, ctx: Dictionary, minute: int) -> Dictionary:
 	var home_takers := _shootout_order(home)
 	var away_takers := _shootout_order(away)
@@ -896,17 +756,6 @@ static func _run_shootout(home: Dictionary, away: Dictionary, ctx: Dictionary, m
 	return {"home": home_score, "away": away_score}
 
 
-static func _touch(skill: float, unit: Dictionary, rng: RandomNumberGenerator, knobs: Dictionary) -> float:
-	var ratings: Dictionary = unit.get("ratings", {})
-	var spread := float(knobs.get("team_form_spread", MatchTypesScript.TEAM_FORM_SPREAD))
-	var wobble := rng.randfn(0.0, float(ratings.get("variance", 0.08)) * spread)
-	return clampf(skill + wobble, 0.02, 1.0)
-
-
-static func _coach_edge(team: Dictionary) -> float:
-	return (float(int(team.get("tactics", 10))) - 10.0) / 20.0 * 0.10
-
-
 static func _shoot(
 	takers: Array,
 	opponent: Dictionary,
@@ -918,26 +767,20 @@ static func _shoot(
 	var unit: Dictionary = takers[round_index % takers.size()]
 	var ratings: Dictionary = unit["ratings"]
 	var keeper := _keeper_of(opponent)
-	var keeper_skill := 0.45
-	if not keeper.is_empty():
-		keeper_skill = float((keeper["ratings"] as Dictionary).get("gk_penalty", 0.45))
-	var skill := float(ratings.get("penalty", 0.5))
-	if bool(ratings.get("ice_cold", false)):
-		skill += 0.07
-	skill += 0.06 * (float(ratings.get("pressure", 0.5)) - 0.5)
-	var knobs: Dictionary = ctx.get("knobs", {})
-	var chance := clampf(
-		float(knobs.get("penalty_conversion_base", MatchTypesScript.PENALTY_CONVERSION_BASE))
-			+ 0.30 * (skill - 0.5) - 0.22 * (keeper_skill - 0.5),
-		0.40,
-		0.95
-	)
+	var attrs: Dictionary = unit.player.get("attributes",{})
+	var skill := float((attrs.get("set_pieces",{}) as Dictionary).get("penalties",10))*(0.55+0.45*float(unit.fresh))
+	if bool(ratings.get("ice_cold",false)): skill=minf(20,skill+1)
+	var keeper_attrs: Dictionary = (keeper.get("player",{}) as Dictionary).get("attributes",{})
+	var goalkeeping: Dictionary = keeper_attrs.get("goalkeeping",{})
+	var fresh := 0.55+0.45*float(keeper.get("fresh",1))
+	var fallback := 10 if bool((keeper.get("ratings",{}) as Dictionary).get("is_gk",false)) else 1
+	var outcome: int = load("res://game/action_rules.gd").penalty_trial(skill,float(goalkeeping.get("reflexes",fallback))*fresh,float(goalkeeping.get("positioning",fallback))*fresh,rng,float(ctx.knobs.get("penalty_conversion_base",MatchTypesScript.PENALTY_CONVERSION_BASE))/MatchTypesScript.PENALTY_CONVERSION_BASE,not keeper.is_empty())
 	var entry: Dictionary = unit["entry"]
-	if rng.randf() < chance:
+	if outcome == 2:
 		entry["shootout_scored"] = int(entry["shootout_scored"]) + 1
 		return true
 	entry["shootout_missed"] = int(entry["shootout_missed"]) + 1
-	if not keeper.is_empty() and rng.randf() < 0.5:
+	if not keeper.is_empty() and outcome == 1:
 		var keeper_entry: Dictionary = keeper["entry"]
 		keeper_entry["pen_saved"] = int(keeper_entry["pen_saved"]) + 1
 	_log(ctx, minute, MatchTypesScript.EVENT_SHOOTOUT, {"side": ""}, entry)
@@ -1023,9 +866,17 @@ static func _award_motm(home: Dictionary, away: Dictionary) -> void:
 
 static func _team_report(team: Dictionary, _minutes: int) -> Dictionary:
 	var phases := maxi(int(team["phases"]), 1)
+	var actions := {}
+	for key in ["passes", "completed_passes", "dribbles", "successful_dribbles", "interceptions", "blocks", "crosses", "completed_crosses", "distance_metres"]:
+		var total := 0
+		for entry in team.entries: total+=int(entry.get(key,0))
+		actions[key]=total
 	return {
 		"club_id": int(team["club_id"]),
 		"coach_id": int(team["coach_id"]),
+		"starting_ability": float(team["starting_ability"]),
+		"starting_condition": float(team["starting_condition"]),
+		"starting_keeper": (team["starting_keeper"] as Dictionary).duplicate(),
 		"style": str(team["style"]),
 		"initial_style": str(team["initial_style"]),
 		"plan_source": str(team["plan_source"]),
@@ -1042,6 +893,7 @@ static func _team_report(team: Dictionary, _minutes: int) -> Dictionary:
 		"possession": snappedf(float(team["possession_sum"]) / float(phases), 0.001),
 		"intensity": float(team["intensity_sum"]) / phases,
 		"players": team["entries"],
+		"actions": actions,
 	}
 
 
@@ -1059,20 +911,6 @@ static func _keeper_of(team: Dictionary) -> Dictionary:
 	return stand_in
 
 
-static func _best_on_field(team: Dictionary, key: String) -> Dictionary:
-	var best: Dictionary = {}
-	var best_value := -1.0
-	for unit in team["on_field"]:
-		var ratings: Dictionary = unit["ratings"]
-		if bool(ratings.get("is_gk", false)):
-			continue
-		var value := float(ratings.get(key, 0.0))
-		if value > best_value:
-			best_value = value
-			best = unit
-	return best
-
-
 static func _pick_weighted(weights: PackedFloat32Array, total: float, rng: RandomNumberGenerator) -> int:
 	if total <= 0.0 or weights.is_empty():
 		return -1
@@ -1085,56 +923,8 @@ static func _pick_weighted(weights: PackedFloat32Array, total: float, rng: Rando
 	return weights.size() - 1
 
 
-static func _sample_poisson(lambda: float, rng: RandomNumberGenerator) -> int:
-	if lambda <= 0.0:
-		return 0
-	var limit := exp(-lambda)
-	var product := rng.randf()
-	var count := 0
-	while product > limit and count < 8:
-		count += 1
-		product *= rng.randf()
-	return count
-
-
-static func _lineup_ability(lineup: Dictionary) -> float:
-	var starters: Array = lineup.get("starters", [])
-	if starters.is_empty():
-		return 0.0
-	var total := 0.0
-	for record in starters:
-		var player: Dictionary = record["player"]
-		total += float(MatchRatings.of(player).get("ability", 0.5)) * 100.0 \
-			* float(record["fit"]) \
-			* MatchSimConfigScript.condition_play_mult(PlayerConditionScript.condition_of(player))
-	return total / float(starters.size())
-
-
-## The lineup gap is the match. Eighteen ability points is a clear chance edge.
-static func _squad_factor(team: Dictionary, opponent: Dictionary) -> float:
-	var gap := clampf(
-		(float(team.get("ability", 50.0)) - float(opponent.get("ability", 50.0))) / 45.0,
-		-1.0,
-		1.0
-	)
-	return clampf(1.0 + gap * 0.18, 0.78, 1.22)
-
-
-## Tactics is the plan against this opponent. Equal coaches change nothing.
-static func _coach_factor(team: Dictionary, opponent: Dictionary) -> float:
-	var delta := (float(int(team.get("tactics", 10))) - float(int(opponent.get("tactics", 10)))) / 20.0
-	return clampf(1.0 + delta * 0.34, 0.72, 1.38)
-
-
-## A bad day nudges the team. It does not overturn the squad or the coach.
 static func _day_form(_rng: RandomNumberGenerator, _knobs: Dictionary) -> float:
 	return 1.0
-
-
-static func _home_bonus(spec: Dictionary, knobs: Dictionary) -> float:
-	var reputation := clampf(float(spec.get("reputation", 500)) / 1000.0, 0.0, 1.0)
-	return float(knobs.get("home_advantage", MatchTypesScript.HOME_ADVANTAGE)) \
-		+ float(knobs.get("home_reputation_bonus", MatchTypesScript.HOME_REPUTATION_BONUS)) * reputation
 
 
 static func _coach_attr(coach: Dictionary, key: String) -> int:

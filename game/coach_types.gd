@@ -10,7 +10,10 @@ const ATTR_MOTIVATION := "motivation"
 const ATTR_DEVELOPMENT := "development"
 const ATTR_DISCIPLINE := "discipline"
 
+const ATTR_PROFESSIONALISM := "professionalism"
+
 const ATTR_KEYS := [
+	ATTR_PROFESSIONALISM,
 	ATTR_TRANSFERS,
 	ATTR_NEGOTIATIONS,
 	ATTR_TACTICS,
@@ -20,32 +23,33 @@ const ATTR_KEYS := [
 ]
 
 const ATTR_LABELS := {
+	ATTR_PROFESSIONALISM: "Профессионализм",
 	ATTR_TRANSFERS: "Трансферы",
 	ATTR_NEGOTIATIONS: "Переговоры",
-	ATTR_TACTICS: "Тактика",
+	ATTR_TACTICS: "Организация игры",
 	ATTR_MOTIVATION: "Мотивация",
 	ATTR_DEVELOPMENT: "Развитие",
 	ATTR_DISCIPLINE: "Дисциплина",
 }
 
 const ATTR_TIPS := {
+	ATTR_PROFESSIONALISM: "Точность оценки игроков, их формы и выбора состава сборной.",
 	ATTR_TRANSFERS: "Работа на рынке: оценка игроков и сбор состава.",
 	ATTR_NEGOTIATIONS: "Удержание своих: продление контрактов и согласие игрока остаться.",
-	ATTR_TACTICS: "Игровые схемы, подготовка к матчу и чтение соперника.",
+	ATTR_TACTICS: "Организация опеки, подготовка к матчу и выбор продолжения атаки.",
 	ATTR_MOTIVATION: "Раздевалка и умение выжать максимум из текущего состава.",
 	ATTR_DEVELOPMENT: "Рост футболистов на тренировках и работа с молодёжью.",
 	ATTR_DISCIPLINE: "Порядок в команде, требования и контроль атмосферы.",
 }
 
 const STYLE_ATTACKING := "attacking"
-const STYLE_BALANCED := "balanced"
+const STYLE_BALANCED := STYLE_ATTACKING # Legacy constant; there is no third mentality.
 const STYLE_DEFENSIVE := "defensive"
 
-const STYLES := [STYLE_ATTACKING, STYLE_BALANCED, STYLE_DEFENSIVE]
+const STYLES := [STYLE_ATTACKING, STYLE_DEFENSIVE]
 
 const STYLE_LABELS := {
 	STYLE_ATTACKING: "Атакующий",
-	STYLE_BALANCED: "Сбалансированный",
 	STYLE_DEFENSIVE: "Оборонительный",
 }
 
@@ -66,7 +70,7 @@ static func attr_tip(key: String) -> String:
 
 
 static func style_label(code: String) -> String:
-	return str(STYLE_LABELS.get(code, "—"))
+	return TacticTypesScript.style_label(code)
 
 
 static func ensure_tactics(coach: Dictionary) -> Dictionary:
@@ -123,10 +127,27 @@ static func calc_current_ability(attributes: Dictionary) -> int:
 	var total := 0
 	var count := 0
 	for key in ATTR_KEYS:
-		if not attributes.has(key):
+		if key == ATTR_PROFESSIONALISM or not attributes.has(key):
 			continue
 		total += clamp_attr(int(attributes.get(key, 1)))
 		count += 1
 	if count < 1:
 		return 1
 	return PlayerTypes.clamp_ability(int(round(float(total) / float(count) * 5.0)))
+
+
+static func professionalism_of(coach: Dictionary) -> int:
+	var attributes: Dictionary = coach.get("attributes", {})
+	return clamp_attr(int(attributes.get(ATTR_PROFESSIONALISM, 10)))
+
+## Squared falloff: competent coaches only confuse close candidates.
+static func selection_uncertainty(coach: Dictionary) -> float:
+	var weakness := float(20 - professionalism_of(coach)) / 19.0
+	return weakness * weakness
+
+static func ensure_professionalism(coach: Dictionary) -> void:
+	if not coach.has("attributes"):
+		coach["attributes"] = {}
+	if not coach["attributes"].has(ATTR_PROFESSIONALISM):
+		# Stable migration independent of the match RNG.
+		coach["attributes"][ATTR_PROFESSIONALISM] = 6 + absi(int(coach.get("id", 0)) * 7919) % 15

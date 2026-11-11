@@ -31,6 +31,8 @@ var _prizes_dialog: Control
 
 var _identity_box: VBoxContainer
 var _rules_section: PanelContainer
+var _unit_actions: HBoxContainer
+var _unit_subtitle: Label
 var _units_list: VBoxContainer
 var _empty_units_label: Label
 var _create_hint: Label
@@ -98,7 +100,10 @@ func _build_fields() -> void:
 	_format_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	shape_row.add_child(_format_field)
 	_format_field.set_items(CompetitionTypes.scope_options(), CompetitionTypes.SCOPE_DOMESTIC)
-	_format_field.item_selected.connect(func(_i): _refresh_context_fields())
+	_format_field.item_selected.connect(func(_i):
+		_refresh_context_fields()
+		_load_units()
+	)
 
 	_country_field = _make_select("Страна")
 	_country_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -111,7 +116,7 @@ func _build_fields() -> void:
 	_age_group_field = _make_select("Возрастная группа")
 	_age_group_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	shape_row.add_child(_age_group_field)
-	_age_group_field.set_items(CompetitionTypes.age_group_options(), CompetitionTypes.AGE_SENIOR)
+	_age_group_field.set_items([{ "id": CompetitionTypes.AGE_SENIOR, "label": "Основная" }], CompetitionTypes.AGE_SENIOR)
 
 	_create_hint = Label.new()
 	_create_hint.text = "После создания откройте турнир, чтобы добавить дивизионы, кубки и суперкубки."
@@ -157,6 +162,7 @@ func _build_composition_section() -> void:
 	titles.add_child(title)
 
 	var subtitle := Label.new()
+	_unit_subtitle = subtitle
 	subtitle.text = "Дивизионы, кубки и суперкубки в одном списке. Тип — у каждого элемента."
 	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	subtitle.add_theme_color_override("font_color", WeTokens.TEXT_MUTED)
@@ -164,6 +170,7 @@ func _build_composition_section() -> void:
 	titles.add_child(subtitle)
 
 	var actions := HBoxContainer.new()
+	_unit_actions = actions
 	actions.add_theme_constant_override("separation", 6)
 	header.add_child(actions)
 
@@ -183,7 +190,7 @@ func _build_composition_section() -> void:
 	scroll.add_child(_units_list)
 
 	_empty_units_label = Label.new()
-	_empty_units_label.text = "Пока пусто — добавьте дивизион, кубок или суперкубок."
+	_empty_units_label.text = "Добавьте турнир сборных: группы и плей-офф." if _is_international() else "Пока пусто — добавьте дивизион, кубок или суперкубок."
 	_empty_units_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_empty_units_label.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
 	_empty_units_label.add_theme_font_size_override("font_size", 11)
@@ -361,6 +368,22 @@ func _refresh_context_fields() -> void:
 	_country_field.visible = scope == CompetitionTypes.SCOPE_DOMESTIC
 	_continent_field.visible = scope == CompetitionTypes.SCOPE_CONTINENTAL
 	_age_group_field.visible = scope == CompetitionTypes.SCOPE_INTERNATIONAL
+	if _unit_actions != null:
+		for child in _unit_actions.get_children():
+			_unit_actions.remove_child(child)
+			child.queue_free()
+		if _is_international():
+			_unit_subtitle.text = "Групповой этап → плей-офф. Новая жеребьёвка перед каждым розыгрышем."
+			_unit_actions.add_child(_make_add_button("+ Турнир сборных", CompetitionTypes.UNIT_DIVISION))
+		else:
+			_unit_subtitle.text = "Дивизионы, кубки и суперкубки в одном списке. Тип — у каждого элемента."
+			_unit_actions.add_child(_make_add_button("+ Дивизион", CompetitionTypes.UNIT_DIVISION))
+			_unit_actions.add_child(_make_add_button("+ Кубок", CompetitionTypes.UNIT_CUP))
+			_unit_actions.add_child(_make_add_button("+ Суперкубок", CompetitionTypes.UNIT_SUPER_CUP))
+
+
+func _is_international() -> bool:
+	return str(_format_field.selected_id) == CompetitionTypes.SCOPE_INTERNATIONAL
 
 
 func _default_start_season() -> int:
@@ -387,7 +410,7 @@ func _render_units() -> void:
 
 	if _units.is_empty():
 		_empty_units_label = Label.new()
-		_empty_units_label.text = "Пока пусто — добавьте дивизион, кубок или суперкубок."
+		_empty_units_label.text = "Добавьте турнир сборных: группы и плей-офф." if _is_international() else "Пока пусто — добавьте дивизион, кубок или суперкубок."
 		_empty_units_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		_empty_units_label.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
 		_empty_units_label.add_theme_font_size_override("font_size", 11)
@@ -402,6 +425,8 @@ func _render_units() -> void:
 
 
 func _make_unit_card(unit: Dictionary, kind_index: int) -> PanelContainer:
+	if _is_international():
+		unit = InternationalDraw.normalize(unit)
 	var unit_id: int = int(unit.get("id", 0))
 	var kind: String = str(unit.get("unit_kind", ""))
 	var unit_name: String = str(unit.get("name", ""))
@@ -433,7 +458,7 @@ func _make_unit_card(unit: Dictionary, kind_index: int) -> PanelContainer:
 	header.add_child(chevron)
 
 	var badge := Label.new()
-	badge.text = CompetitionTypes.unit_kind_label(kind)
+	badge.text = "Группы + плей-офф" if _is_international() else CompetitionTypes.unit_kind_label(kind)
 	badge.add_theme_color_override("font_color", WeTokens.ACCENT)
 	badge.add_theme_font_size_override("font_size", 11)
 	badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -503,6 +528,7 @@ func _make_unit_card(unit: Dictionary, kind_index: int) -> PanelContainer:
 	level_field.value = int(unit.get("level", 1))
 	level_field.custom_minimum_size = Vector2(84, 0)
 	fields.add_child(level_field)
+	level_field.visible = not _is_international()
 	level_field.value_changed.connect(func(v: int): _on_unit_level_changed(unit_id, v))
 
 	if kind == CompetitionTypes.UNIT_DIVISION:
@@ -517,6 +543,7 @@ func _make_unit_card(unit: Dictionary, kind_index: int) -> PanelContainer:
 		strength_field.tooltip_text = "Коэффициент силы дивизиона, шкала репутации 0–1000"
 		strength_field.custom_minimum_size = Vector2(96, 0)
 		fields.add_child(strength_field)
+		strength_field.visible = not _is_international()
 		strength_field.value_changed.connect(func(v: int):
 			_on_unit_rule_changed(unit_id, "division_strength", v)
 		)
@@ -527,7 +554,7 @@ func _make_unit_card(unit: Dictionary, kind_index: int) -> PanelContainer:
 	type_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	type_field.size_flags_stretch_ratio = 0.9
 	fields.add_child(type_field)
-	type_field.set_items(CompetitionTypes.type_options(), current_type)
+	type_field.set_items([{ "id": CompetitionTypes.TYPE_GROUP_AND_PLAYOFF, "label": "Группы + плей-офф" }] if _is_international() else CompetitionTypes.type_options(), current_type)
 	type_field.item_selected.connect(func(_i: int): _on_unit_type_changed(unit_id, str(type_field.selected_id)))
 
 	var foreign_field := _make_number(
@@ -539,6 +566,7 @@ func _make_unit_card(unit: Dictionary, kind_index: int) -> PanelContainer:
 	foreign_field.tooltip_text = "0 — ни одного легионера. −1 — без лимита."
 	foreign_field.custom_minimum_size = Vector2(108, 0)
 	fields.add_child(foreign_field)
+	foreign_field.visible = not _is_international()
 	foreign_field.value_changed.connect(func(v: int): _on_unit_foreign_changed(unit_id, unit, v))
 
 	var clubs_wrap := VBoxContainer.new()
@@ -547,7 +575,7 @@ func _make_unit_card(unit: Dictionary, kind_index: int) -> PanelContainer:
 	fields.add_child(clubs_wrap)
 
 	var clubs_label := Label.new()
-	clubs_label.text = "Клубы"
+	clubs_label.text = "Сборные" if str(_format_field.selected_id) == CompetitionTypes.SCOPE_INTERNATIONAL else "Клубы"
 	clubs_label.add_theme_color_override("font_color", WeTokens.TEXT_MUTED)
 	clubs_label.add_theme_font_size_override("font_size", 11)
 	clubs_wrap.add_child(clubs_label)
@@ -565,9 +593,12 @@ func _make_unit_card(unit: Dictionary, kind_index: int) -> PanelContainer:
 	body.add_child(_make_unit_section("Основное", fields))
 	body.add_child(_make_unit_section("Дисциплина", _make_discipline_row(unit_id, unit)))
 
-	if current_type == CompetitionTypes.TYPE_DIVISIONS:
-		body.add_child(_make_unit_section("Структура", _make_divisions_rules_row(unit_id, unit)))
-		body.add_child(_make_unit_section("Переходы и итоги", _make_divisions_movement_row(unit_id, unit)))
+	if current_type == CompetitionTypes.TYPE_DIVISIONS or _is_international():
+		body.add_child(_make_unit_section("Групповой этап" if _is_international() else "Структура", _make_divisions_rules_row(unit_id, unit)))
+		if _is_international():
+			body.add_child(_make_unit_section("Жеребьёвка групп", _make_group_draw_row(unit_id, unit)))
+		else:
+			body.add_child(_make_unit_section("Переходы и итоги", _make_divisions_movement_row(unit_id, unit)))
 		body.add_child(_make_unit_section("Плей-офф", _make_divisions_playoff_row(unit_id, unit)))
 		body.add_child(_make_unit_section("Призовые", _make_divisions_prize_row(unit)))
 
@@ -707,7 +738,7 @@ func _make_discipline_row(unit_id: int, unit: Dictionary) -> HBoxContainer:
 func _make_divisions_rules_row(unit_id: int, unit: Dictionary) -> HBoxContainer:
 	var row := _make_row()
 
-	var divisions := _make_number("Див.", 1, CompetitionUnitRepository.RULE_COUNT_MAX)
+	var divisions := _make_number("Групп" if _is_international() else "Див.", 1, CompetitionUnitRepository.RULE_COUNT_MAX)
 	divisions.value = int(unit.get("divisions_count", CompetitionUnitRepository.DIVISIONS_COUNT_DEFAULT))
 	divisions.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(divisions)
@@ -716,13 +747,27 @@ func _make_divisions_rules_row(unit_id: int, unit: Dictionary) -> HBoxContainer:
 		call_deferred("_load_units")
 	)
 
-	var teams := _make_number("Кл./див.", 1, CompetitionUnitRepository.RULE_COUNT_MAX)
+	var teams := _make_number("Сборных/гр." if _is_international() else "Кл./див.", 1, CompetitionUnitRepository.RULE_COUNT_MAX)
 	teams.value = int(unit.get("teams_per_division", CompetitionUnitRepository.TEAMS_PER_DIVISION_DEFAULT))
 	teams.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(teams)
 	teams.value_changed.connect(func(v: int): _on_unit_rule_changed(unit_id, "teams_per_division", v))
 
-	var own_games := _make_number("Игры своя", 0, CompetitionUnitRepository.RULE_COUNT_MAX)
+	if not _is_international():
+		var sort_field := _make_select("Состав")
+		sort_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		sort_field.custom_minimum_size = Vector2(148, 0)
+		sort_field.tooltip_text = "Каждый сезон заново. Случайный — жребий. По репутации или по Elo — клубы сортируются по выбранному показателю и распределяются по очереди: 1-й дивизион, 2-й и далее. Elo берётся на момент жеребьёвки; на старте — из силы начального чемпионата клуба."
+		row.add_child(sort_field)
+		sort_field.set_items(
+			CompetitionUnitRepository.division_sort_options(),
+			CompetitionUnitRepository.normalize_division_sort(unit.get("division_sort", CompetitionUnitRepository.DIVISION_SORT_DEFAULT))
+		)
+		sort_field.item_selected.connect(func(_i: int):
+			_on_unit_rule_changed(unit_id, "division_sort", str(sort_field.selected_id))
+		)
+
+	var own_games := _make_number("Кругов в группе" if _is_international() else "Игры своя", 1 if _is_international() else 0, CompetitionUnitRepository.RULE_COUNT_MAX)
 	own_games.value = int(unit.get("matches_vs_own", CompetitionUnitRepository.MATCHES_VS_OWN_DEFAULT))
 	own_games.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(own_games)
@@ -732,6 +777,7 @@ func _make_divisions_rules_row(unit_id: int, unit: Dictionary) -> HBoxContainer:
 	other_games.value = int(unit.get("matches_vs_other", CompetitionUnitRepository.MATCHES_VS_OTHER_DEFAULT))
 	other_games.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(other_games)
+	other_games.visible = not _is_international()
 	other_games.value_changed.connect(func(v: int): _on_unit_rule_changed(unit_id, "matches_vs_other", v))
 
 	var pts_win := _make_number("Очки П", 0, CompetitionUnitRepository.POINTS_MAX)
@@ -848,7 +894,7 @@ func _make_divisions_playoff_row(unit_id: int, unit: Dictionary) -> HBoxContaine
 	playoff_scope_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	playoff_scope_field.custom_minimum_size = Vector2(110, 0)
 	row.add_child(playoff_scope_field)
-	playoff_scope_field.set_items(CompetitionUnitRepository.scope_options(), playoff_scope)
+	playoff_scope_field.set_items([{ "id": CompetitionUnitRepository.SCOPE_PER_DIVISION, "label": "Из групп + лучшие" }, { "id": CompetitionUnitRepository.SCOPE_OVERALL, "label": "Общая таблица групп" }] if _is_international() else CompetitionUnitRepository.scope_options(), playoff_scope)
 	playoff_scope_field.item_selected.connect(func(_i: int):
 		_on_unit_rule_changed(unit_id, "playoff_scope", str(playoff_scope_field.selected_id))
 		call_deferred("_load_units")
@@ -893,14 +939,42 @@ func _make_divisions_playoff_row(unit_id: int, unit: Dictionary) -> HBoxContaine
 		_on_unit_rule_changed(unit_id, "playoff_seeding", str(seeding_field.selected_id))
 	)
 
-	row.add_child(_make_rule_checkbox(
-		unit_id,
-		"Матч 3-е",
-		"playoff_third_place",
-		bool(unit.get("playoff_third_place", PlayoffRules.THIRD_PLACE_DEFAULT)),
-		"бронза"
-	))
+	if _is_international():
+		var bronze := Label.new()
+		bronze.text = "Матч за 3-е место\nОбязательный"
+		row.add_child(bronze)
+	else:
+		row.add_child(_make_rule_checkbox(
+			unit_id,
+			"Матч 3-е",
+			"playoff_third_place",
+			bool(unit.get("playoff_third_place", PlayoffRules.THIRD_PLACE_DEFAULT)),
+			"бронза"
+		))
 
+	return row
+
+
+func _make_group_draw_row(unit_id: int, unit: Dictionary) -> HBoxContainer:
+	var row := _make_row()
+	var select := _make_select("Распределение по группам")
+	select.custom_minimum_size = Vector2(260, 0)
+	row.add_child(select)
+	select.set_items(InternationalDraw.options(), InternationalDraw.rules(unit.get("group_draw_rules", {}))["mode"])
+	var note := Label.new()
+	select.item_selected.connect(func(_i):
+		var settings := InternationalDraw.rules(unit.get("group_draw_rules", {}))
+		settings["mode"] = str(select.selected_id)
+		note.text = InternationalDraw.description(str(select.selected_id))
+		_on_unit_rule_changed(unit_id, "group_draw_rules", settings)
+	)
+	note.text = InternationalDraw.description(str(select.selected_id))
+	note.add_theme_font_size_override("font_size", 11)
+	row.add_child(note)
+	var ranking := Button.new()
+	ranking.text = "Правила мест"
+	ranking.pressed.connect(func(): _on_open_unit_ranking(unit))
+	row.add_child(ranking)
 	return row
 
 
@@ -1061,12 +1135,19 @@ func _make_quota_field(
 	var hint := Label.new()
 	hint.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
 	hint.add_theme_font_size_override("font_size", 10)
-	hint.text = CompetitionUnitRepository.quota_hint(value, divisions_count, scope_code)
+	var is_movement := field in ["teams_promote", "teams_relegate"]
+	hint.text = CompetitionUnitRepository.movement_quota_hint(value, divisions_count, scope_code) if is_movement else CompetitionUnitRepository.quota_hint(value, divisions_count, scope_code)
+	if _is_international() and field == "teams_playoff":
+		hint.text = "0 — авто" if value == 0 else ("из общей таблицы" if scope_code == CompetitionUnitRepository.SCOPE_OVERALL else "по %d/гр. + %d лучших" % [int(value / maxi(1, divisions_count)), value % maxi(1, divisions_count)])
+	if is_movement:
+		number_field.tooltip_text = "Общее число клубов, переходящих в соседнюю лигу этого турнира по уровню «Ур.». В режиме «Кажд. див.» места распределяются между дивизионами; остаток — по итоговой таблице."
 	wrap.add_child(hint)
 
 	number_field.value_changed.connect(func(v: int):
 		_on_unit_rule_changed(unit_id, field, v)
-		hint.text = CompetitionUnitRepository.quota_hint(v, divisions_count, scope_code)
+		hint.text = CompetitionUnitRepository.movement_quota_hint(v, divisions_count, scope_code) if is_movement else CompetitionUnitRepository.quota_hint(v, divisions_count, scope_code)
+		if _is_international() and field == "teams_playoff":
+			hint.text = "0 — авто" if v == 0 else ("из общей таблицы" if scope_code == CompetitionUnitRepository.SCOPE_OVERALL else "по %d/гр. + %d лучших" % [int(v / maxi(1, divisions_count)), v % maxi(1, divisions_count)])
 	)
 	return wrap
 
@@ -1078,9 +1159,10 @@ func _on_add_unit(unit_kind: String) -> void:
 	var result: Dictionary = _unit_repo.create({
 		"competition_id": _edit_id,
 		"unit_kind": unit_kind,
-		"name": CompetitionTypes.default_name_for_unit(unit_kind, next_index),
+		"name": ("Турнир сборных %d" % next_index) if _is_international() else CompetitionTypes.default_name_for_unit(unit_kind, next_index),
 		"level": 1,
-		"competition_type": CompetitionTypes.default_type_for_unit(unit_kind),
+		"competition_type": CompetitionTypes.TYPE_GROUP_AND_PLAYOFF if _is_international() else CompetitionTypes.default_type_for_unit(unit_kind),
+		"playoff_format": PlayoffRules.FORMAT_SINGLE if _is_international() else PlayoffRules.FORMAT_DEFAULT,
 		"sort_order": _unit_repo.next_sort_order(_edit_id),
 	})
 	if not result["success"]:
@@ -1225,22 +1307,39 @@ func _on_open_unit_clubs(unit: Dictionary) -> void:
 		show_error(str(clubs_result.get("error", "Не удалось загрузить клубы.")))
 		return
 
-	var selected_result: Dictionary = _unit_repo.get_club_ids(unit_id)
+	var national := str(_format_field.selected_id) == CompetitionTypes.SCOPE_INTERNATIONAL
+	var selected_result: Dictionary = _unit_repo.get_country_ids(unit_id) if national else _unit_repo.get_club_ids(unit_id)
 	if not selected_result["success"]:
 		show_error(str(selected_result.get("error", "Не удалось загрузить выбранные клубы.")))
 		return
+
+	var taken: Array = []
+	if not national and str(unit.get("unit_kind", "")) == CompetitionTypes.UNIT_DIVISION:
+		var taken_result: Dictionary = _unit_repo.club_ids_in_other_divisions(_edit_id, unit_id)
+		if not taken_result["success"]:
+			show_error(str(taken_result.get("error", "Не удалось загрузить клубы других дивизионов.")))
+			return
+		taken = taken_result["data"]
 
 	clear_error()
 	_clubs_dialog.open_picker(
 		unit_id,
 		str(unit.get("name", CompetitionTypes.unit_kind_label(str(unit.get("unit_kind", ""))))),
 		clubs_result["data"],
-		selected_result["data"]
+		selected_result["data"],
+		national,
+		taken
 	)
 
 
 func _load_clubs_for_picker() -> Dictionary:
 	var scope: String = str(_format_field.selected_id) if _format_field.selected_id != null else ""
+	if scope == CompetitionTypes.SCOPE_INTERNATIONAL:
+		var countries := CountryRepository.new().get_all()
+		if countries["success"]:
+			for country in countries["data"]:
+				country["logo_path"] = country.get("flag_path", "")
+		return countries
 	match scope:
 		CompetitionTypes.SCOPE_DOMESTIC:
 			var country_id: int = int(_country_field.selected_id) if _country_field.selected_id != null else 0
@@ -1259,7 +1358,8 @@ func _load_clubs_for_picker() -> Dictionary:
 func _on_unit_clubs_submitted(unit_id: int, club_ids: Array) -> void:
 	if _busy or unit_id < 1:
 		return
-	var result: Dictionary = _unit_repo.set_club_ids(unit_id, club_ids)
+	var national := str(_format_field.selected_id) == CompetitionTypes.SCOPE_INTERNATIONAL
+	var result: Dictionary = _unit_repo.set_country_ids(unit_id, club_ids) if national else _unit_repo.set_club_ids(unit_id, club_ids)
 	if not result["success"]:
 		show_error(str(result.get("error", "Не удалось сохранить клубы.")))
 		return
@@ -1316,7 +1416,21 @@ func _on_save_pressed() -> void:
 			if age_code == null or not CompetitionTypes.is_valid_age_group(str(age_code)):
 				show_error("Выберите возрастную группу.")
 				return
+			if str(age_code) != CompetitionTypes.AGE_SENIOR:
+				show_error("Пока доступны только основные сборные.")
+				return
 			payload["age_group"] = str(age_code)
+			for unit in _units:
+				var participants := int(unit.get("clubs_count", 0))
+				var groups := int(unit.get("divisions_count", 2))
+				var per_group := int(unit.get("teams_per_division", 4))
+				if participants < 4 or participants != groups * per_group or per_group < 2:
+					show_error("Для «%s» выберите минимум 4 сборные. Число сборных должно совпадать с числом групп × сборных в группе." % str(unit.get("name", "")))
+					return
+				var places := int(unit.get("teams_playoff", 0))
+				if places != 0 and (places < 4 or places > participants or (places & (places - 1)) != 0):
+					show_error("Мест в плей-офф: 4, 8, 16, 32, 64 (не больше числа сборных). 0 — автоматически.")
+					return
 
 	clear_error()
 	submitted.emit(payload)

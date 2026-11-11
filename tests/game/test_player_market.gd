@@ -18,7 +18,7 @@ const TIERS: Array = [
 	["strong", 15, 750, 67],
 	["best", 20, 1000, 75],
 ]
-const SQUAD_SIZE := 25
+const SQUAD_SIZE := 20
 const RESERVE_SIZE := 12
 const SQUAD_SPREAD := 12
 const SQUAD_AGES: Array = [18, 20, 22, 24, 26, 28, 30, 32, 34]
@@ -109,11 +109,11 @@ func _test_value_collapses_with_age() -> void:
 	var thirty_four := PlayerMarketScript.value_for(80, 80, 34, 700)
 	_assert(thirty < peak / 2, "a 30-year-old is worth under half his peak (%d vs %d)" % [thirty, peak])
 	_assert(thirty_four < thirty / 4, "a 34-year-old is nearly worthless (%d vs %d)" % [thirty_four, thirty])
-	# Past 35 the resale multiple drops below one year's wage.
+	# Veterans retain the new x2.5 price scale while remaining far below peak.
 	_assert(
 		PlayerMarketScript.value_for(85, 85, 36, 900)
-			< PlayerMarketScript.wage_for(85.0, 900, 36),
-		"a veteran past 35 is worth less than a year's wage"
+			< PlayerMarketScript.wage_for(85.0, 900, 36) * 3,
+		"a veteran past 35 is worth under three annual wages"
 	)
 
 
@@ -147,7 +147,7 @@ func _test_fee_is_a_sane_multiple_of_salary() -> void:
 		var peak_ratio := float(PlayerMarketScript.value_for(ca, ca, 26, rep)) \
 			/ float(PlayerMarketScript.wage_for(float(ca), rep, 26))
 		_assert(
-			peak_ratio > 18.0 and peak_ratio < 54.0,
+			peak_ratio > 18.0 * PlayerMarketScript.VALUE_MULTIPLIER and peak_ratio < 54.0 * PlayerMarketScript.VALUE_MULTIPLIER,
 			"CA %d peak fee is %.1f salaries" % [ca, peak_ratio]
 		)
 
@@ -172,8 +172,9 @@ func _test_every_tier_can_pay_its_squad() -> void:
 func _test_only_the_rich_buy_the_best() -> void:
 	var elite := PlayerMarketScript.value_for(85, 85, 27, _player_rep(85, 1000))
 	var starter := PlayerMarketScript.value_for(70, 72, 26, _player_rep(70, 500))
-	var best_cap := ClubFinanceScript.max_single_fee(ClubFinanceScript.seasonal_income(20, 1000))
-	var mid_cap := ClubFinanceScript.max_single_fee(ClubFinanceScript.seasonal_income(10, 500))
+	# With more expensive appraisals, major purchases require accumulated cash.
+	var best_cap := ClubFinanceScript.max_single_fee(ClubFinanceScript.seasonal_income(20, 1000) * 3)
+	var mid_cap := ClubFinanceScript.max_single_fee(ClubFinanceScript.seasonal_income(10, 500) * 3)
 	var poor_cap := ClubFinanceScript.max_single_fee(ClubFinanceScript.seasonal_income(5, 200))
 	_assert(best_cap >= elite, "the best club can sign an elite player (%d vs %d)" % [best_cap, elite])
 	_assert(mid_cap < elite, "a mid club cannot reach an elite (%d vs %d)" % [mid_cap, elite])
@@ -283,18 +284,17 @@ func _test_transfer_keeps_the_old_wage() -> void:
 
 
 func _test_reputation_drifts_without_jumping() -> void:
-	var player := {"current_ability": 90, "reputation": 100, "age": 22}
+	var player := {"current_ability": 90, "reputation": 100, "age": 18, "club_id": 1}
 	var step := PlayerMarketScript.drift_reputation(player, 1000)
 	_assert(
-		step == 100 + PlayerMarketScript.REPUTATION_DRIFT_MAX,
-		"fame climbs by at most one step a season (%d)" % step
+		step == 100,
+		"a talented unused academy player gains no automatic fame (%d)" % step
 	)
 	for _i in 40:
 		PlayerMarketScript.drift_reputation(player, 1000)
-	var target := PlayerMarketScript.target_reputation(90, 1000)
 	_assert(
-		int(player["reputation"]) == target,
-		"fame settles on its target (%d vs %d)" % [int(player["reputation"]), target]
+		int(player["reputation"]) == 100,
+		"club membership alone cannot manufacture fame"
 	)
 	# Dropping out of the game pulls a reputation back down.
 	var faded := {"current_ability": 40, "reputation": 800, "age": 34}

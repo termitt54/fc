@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tests/performance/team_model_audit.gd" id="1"]
+
+[node name="TeamModelAudit" type="Node"]
+script = ExtResource("1")

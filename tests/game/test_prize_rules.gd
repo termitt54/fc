@@ -19,8 +19,10 @@ func _run() -> void:
 	_test_division_and_playoff_rows()
 	_test_regular_payouts()
 	_test_per_division_payouts()
+	_test_divisions_ignore_combined_table()
 	_test_playoff_payouts_stack()
 	_test_session_pays_once()
+	_test_session_division_pays_once()
 	GameSession.clear()
 	_finish()
 
@@ -147,6 +149,25 @@ func _test_playoff_payouts_stack() -> void:
 	_assert(int(paid.get(4, 0)) == 1000, "fourth place is paid")
 
 
+func _test_divisions_ignore_combined_table() -> void:
+	var unit := {"competition_type": "DIVISIONS", "divisions_count": 2,
+		"teams_per_division": 2, "regular_season_enabled": true, "teams_playoff": 4,
+		"playoff_third_place": true,
+		"prize_rules": {"regular_1": 100, "regular_2": 40, "regular_3": 99999, "playoff_champion": 700}}
+	var tables := {0: [{"club_id": 1}, {"club_id": 2}], 1: [{"club_id": 3}, {"club_id": 4}]}
+	var calls: Array = []
+	var playoff := {"series": [_series(1, false, 1, 4, 1), _series(1, false, 3, 2, 3), _series(2, false, 1, 3, 3)]}
+	var paid := PrizeRulesScript.payouts(unit, func(div): calls.append(div); return tables.get(div, []), playoff)
+	_assert(not calls.has(-1), "DIVISIONS never pays combined standings even when enabled")
+	_assert(int(paid.get(1, 0)) == 100 and int(paid.get(3, 0)) == 800, "both division winners paid, playoff champion stacks once")
+	_assert(int(paid.get(2, 0)) == 40 and int(paid.get(4, 0)) == 40, "both division runners-up paid")
+	_assert(PrizeRulesScript.regular_place_count(unit) == 2, "only per-division places are editable")
+	_assert(not PrizeRulesScript.normalize(unit.prize_rules, unit).has("regular_3"), "obsolete combined places do not leak into prizes")
+	_assert(PrizeRulesScript.describe_rows(unit)[0].section == "Дивизион", "section describes division payout")
+	unit.divisions_count = 1
+	_assert(not PrizeRulesScript.uses_overall_regular(unit), "single division keeps division labels and semantics")
+
+
 func _test_session_pays_once() -> void:
 	var rules := {
 		"divisions_count": 1,
@@ -195,6 +216,31 @@ func _series(round_no: int, third: bool, home_id: int, away_id: int, winner_id: 
 		"away_id": away_id,
 		"winner_id": winner_id,
 	}
+
+
+func _test_session_division_pays_once() -> void:
+	var rules := {"competition_type": "DIVISIONS", "divisions_count": 2, "teams_per_division": 2,
+		"regular_season_enabled": true, "teams_playoff": 0,
+		"prize_rules": {"regular_1": 75000, "regular_2": 25000}, "ranking_order": ["POINTS"]}
+	var standings: Array = []
+	var clubs := {}
+	var budgets := {}
+	for i in 4:
+		standings.append({"club_id": i + 1, "division": int(i / 2), "points": 6 if i % 2 == 0 else 0, "played": 2})
+		clubs[i + 1] = {"id": i + 1, "name": "Club %d" % (i + 1)}
+		budgets[i + 1] = 0
+	GameSession.apply_save_payload({"version": GameSession.SAVE_VERSION, "season_number": 1,
+		"season_day": GameSession.FIRST_MATCH_DAY, "wages_paid_for_season": 1,
+		"units": [{"id": 1, "competition_type": "DIVISIONS", "rules": rules,
+			"standings": standings, "matches": [], "clubs_by_id": clubs,
+			"playoff": {"enabled": false, "finished": false, "series": []}}],
+		"players_by_club": {}, "club_budgets": budgets})
+	GameSession._apply_unit_prizes()
+	_assert(GameSession.get_club_budget(1) == 75000 and GameSession.get_club_budget(3) == 75000, "session pays both division champions despite combined table")
+	_assert(GameSession.get_club_budget(2) == 25000 and GameSession.get_club_budget(4) == 25000, "session pays both division runners-up")
+	GameSession._apply_unit_prizes()
+	_assert(GameSession.get_club_budget(3) == 75000, "division payouts remain once per season")
+	GameSession.clear()
 
 
 func _assert(condition: bool, message: String) -> void:

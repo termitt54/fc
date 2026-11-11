@@ -176,9 +176,14 @@ func _build_meta_row() -> void:
 		_meta_host.add_child(_country_link(country_id, country_name, str(country.get("flag_path", ""))))
 		_meta_host.add_child(_meta_dot())
 
+	var national_id := int(_coach.get("national_team_id", 0))
+	if national_id > 0:
+		var national_country := _load_country(national_id)
+		_meta_host.add_child(_meta_text("Главный тренер сборной " + str(national_country.get("name", ""))))
+		return
 	var club_id := int(_coach.get("club_id", 0))
 	if club_id < 1:
-		_meta_host.add_child(_meta_text("Без клуба"))
+		_meta_host.add_child(_meta_text("Завершил карьеру" if _coach.get("employment_status", "") == "retired" else "Без клуба"))
 		return
 	var club := _resolve_club(club_id)
 	var club_name := str(club.get("name", "")).strip_edges()
@@ -200,7 +205,7 @@ func _build_header_facts() -> void:
 		["Контракт", "%d %s" % [years, _years_word(years)]],
 		["Трансферы", "%d/%d" % [transfers, ATTR_MAX]],
 		["Переговоры", "%d/%d" % [talks, ATTR_MAX]],
-		["Стиль", TacticTypesScript.style_label(CoachTypesScript.primary_style_of(_coach))],
+		["Характер игры", TacticTypesScript.style_label(CoachTypesScript.primary_style_of(_coach))],
 	]
 	for fact in facts:
 		_facts_host.add_child(_fact_chip(str(fact[0]), str(fact[1])))
@@ -261,7 +266,7 @@ func _build_body_grid() -> Control:
 
 	top.add_child(_quadrant_panel("Тренерские качества", _build_attributes_content()))
 	top.add_child(_quadrant_panel("Карьера", _build_career_content()))
-	bottom.add_child(_quadrant_panel("Стиль и схема", _build_tactics_content()))
+	bottom.add_child(_quadrant_panel("Характер игры", _build_tactics_content()))
 	bottom.add_child(_quadrant_panel(
 		"Трофеи",
 		_placeholder_body("Трофеи появятся позже")
@@ -298,21 +303,14 @@ func _build_tactics_content() -> Control:
 	var box := VBoxContainer.new()
 	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_theme_constant_override("separation", 6)
-	var primary_style := CoachTypesScript.primary_style_of(_coach)
-	var backup_style := CoachTypesScript.backup_style_of(_coach)
-	var primary_form := CoachTypesScript.primary_formation_of(_coach)
-	var backup_form := CoachTypesScript.backup_formation_of(_coach)
 	var rows := [
-		["Основной стиль", TacticTypesScript.style_label(primary_style), TacticTypesScript.style_tip(primary_style)],
-		["Запасной стиль", TacticTypesScript.style_label(backup_style), TacticTypesScript.style_tip(backup_style)],
-		["Основная схема", TacticTypesScript.formation_label(primary_form), ""],
-		["Запасная схема", TacticTypesScript.formation_label(backup_form), ""],
-		["Характер", CoachTypesScript.style_label(str(_coach.get("style", ""))), "Высота линии и агрессия, не путать со стилем."],
+		["Характер игры",TacticTypesScript.style_label(CoachTypesScript.primary_style_of(_coach)),TacticTypesScript.style_tip(CoachTypesScript.primary_style_of(_coach))],
+		["Схема","3-2-2","Одинаковая схема для всех команд: один вратарь и семь полевых."],
 	]
 	for row in rows:
 		box.add_child(_tactic_row(str(row[0]), str(row[1]), str(row[2])))
 	var note := Label.new()
-	note.text = "На матч чаще берёт своё, но не всегда. Стиль и схема всегда из одного ключа: без автобуса в атаке и без контроля в низком блоке."
+	note.text = "Схема фиксирована. Характер команды определяет осторожность подключений."
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	note.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
 	note.add_theme_font_size_override("font_size", 11)
@@ -387,6 +385,8 @@ func _career_row(entry: Dictionary, zebra: bool) -> PanelContainer:
 	var span := "Сезон %d — н.в." % from_season if to_season < 1 else "Сезоны %d–%d" % [from_season, to_season]
 	var meta := Label.new()
 	meta.text = "Главный тренер · %s" % span
+	if entry.has("departure_reason"):
+		meta.text += " · " + CoachMarket.reason_label(entry["departure_reason"])
 	meta.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
 	meta.add_theme_font_size_override("font_size", 11)
 	cols.add_child(meta)

@@ -1,6 +1,6 @@
 class_name MatchRatings
 extends RefCounted
-## Derived match ratings (0..1) folded out of the 34 raw attributes.
+## Derived ratings from the compact 11 + 5 skill model.
 ## Computed once per player and cached until development changes his ability:
 ## this is what keeps a 500-match day inside the frame budget.
 
@@ -8,100 +8,25 @@ extends RefCounted
 const CACHE_KEY := "_match_ratings"
 
 const MIX := {
-	"create": [
-		["technical", "passing", 3.0],
-		["mental", "vision", 3.0],
-		["mental", "decisions", 2.0],
-		["technical", "technique", 2.0],
-		["technical", "first_touch", 2.0],
-	],
-	"dribble": [
-		["technical", "dribbling", 3.0],
-		["physical", "agility", 2.0],
-		["physical", "balance", 1.5],
-		["physical", "acceleration", 1.5],
-		["technical", "technique", 1.0],
-	],
-	"finish": [
-		["technical", "finishing", 4.0],
-		["mental", "composure", 2.0],
-		["technical", "technique", 1.5],
-		["technical", "first_touch", 1.0],
-	],
-	"long_shot": [
-		["set_pieces", "long_shots", 3.0],
-		["technical", "technique", 1.5],
-		["physical", "strength", 1.0],
-	],
-	"aerial": [
-		["physical", "strength", 2.5],
-		["mental", "bravery", 1.5],
-		["physical", "balance", 1.0],
-	],
-	"defend": [
-		["technical", "tackling", 3.0],
-		["technical", "marking", 3.0],
-		["mental", "anticipation", 2.5],
-		["mental", "concentration", 2.0],
-		["physical", "strength", 1.5],
-	],
-	"press": [
-		["mental", "work_rate", 3.0],
-		["physical", "stamina", 2.5],
-		["mental", "anticipation", 1.5],
-		["physical", "pace", 1.5],
-	],
-	"pace": [
-		["physical", "pace", 2.0],
-		["physical", "acceleration", 2.0],
-	],
-	"endurance": [
-		["physical", "stamina", 3.0],
-		["mental", "work_rate", 1.0],
-	],
-	"set_piece": [
-		["set_pieces", "corners", 2.0],
-		["set_pieces", "free_kicks", 2.0],
-		["technical", "crossing", 1.5],
-	],
-	"penalty": [
-		["set_pieces", "penalties", 3.0],
-		["mental", "composure", 2.0],
-	],
-	"off_ball": [
-		["mental", "off_the_ball", 3.0],
-		["mental", "anticipation", 1.5],
-	],
-	"poise": [
-		["mental", "composure", 2.0],
-		["mental", "concentration", 1.5],
-		["mental", "decisions", 1.5],
-	],
+	"create": [["technical", "passing", 4.0], ["technical", "technique", 2.0]],
+	"dribble": [["technical", "dribbling", 4.0], ["physical", "pace", 1.0], ["technical", "technique", 1.0]],
+	"finish": [["technical", "finishing", 4.0], ["technical", "technique", 1.0]],
+	"aerial": [["physical", "strength", 1.0]],
+	"defend": [["technical", "defending", 4.0], ["physical", "strength", 1.0]],
+	"press": [["technical", "defending", 2.0], ["physical", "stamina", 2.0], ["physical", "pace", 1.0]],
+	"pace": [["physical", "pace", 1.0]],
+	"endurance": [["physical", "stamina", 1.0]],
+	"set_piece": [["set_pieces", "delivery", 1.0]],
+	"penalty": [["set_pieces", "penalties", 1.0]],
+	"off_ball": [["technical", "technique", 1.0], ["technical", "finishing", 1.0], ["physical", "pace", 1.0]],
+	"poise": [["technical", "technique", 1.0]],
 }
 
 const GK_MIX := {
-	"gk_stop": [
-		["goalkeeping", "reflexes", 3.5],
-		["goalkeeping", "handling", 2.5],
-		["goalkeeping", "positioning", 2.5],
-		["mental", "concentration", 1.5],
-		["physical", "agility", 1.0],
-	],
-	"gk_one_on_one": [
-		["goalkeeping", "one_on_ones", 3.0],
-		["goalkeeping", "rushing_out", 1.5],
-		["mental", "bravery", 1.5],
-	],
-	"gk_aerial": [
-		["goalkeeping", "aerial_reach", 2.5],
-		["goalkeeping", "handling", 1.5],
-		["goalkeeping", "communication", 1.0],
-	],
-	"gk_penalty": [
-		["goalkeeping", "reflexes", 2.0],
-		["goalkeeping", "one_on_ones", 2.0],
-		["mental", "concentration", 1.5],
-	],
+	"gk_stop": [["goalkeeping", "reflexes", 3.5], ["goalkeeping", "handling", 2.5], ["goalkeeping", "positioning", 2.5]],
+	"gk_one_on_one": [["goalkeeping", "exits", 1.0]],
+	"gk_aerial": [["goalkeeping", "aerial_reach", 2.5], ["goalkeeping", "handling", 1.5]],
+	"gk_penalty": [["goalkeeping", "reflexes", 2.0], ["goalkeeping", "exits", 2.0], ["goalkeeping", "positioning", 1.5]],
 }
 
 
@@ -130,6 +55,9 @@ static func _stamp(player: Dictionary) -> int:
 
 
 static func _build(player: Dictionary, stamp: int) -> Dictionary:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return native.build_ratings(player)
 	var attributes: Variant = player.get("attributes", null)
 	var attrs: Dictionary = attributes if typeof(attributes) == TYPE_DICTIONARY else {}
 	var position := PlayerTypes.normalize_position(str(player.get("position", "")))
@@ -143,17 +71,7 @@ static func _build(player: Dictionary, stamp: int) -> Dictionary:
 			out[key] = _mix(attrs, GK_MIX[key])
 	else:
 		for key in GK_MIX.keys():
-			out[key] = 0.25
-
-	var personality: Variant = player.get("personality", null)
-	var traits: Dictionary = personality if typeof(personality) == TYPE_DICTIONARY else {}
-	var aggression := _scale(int(traits.get("aggression", 10)))
-	var temperament := _scale(int(traits.get("temperament", 10)))
-	var sportsmanship := _scale(int(traits.get("sportsmanship", 10)))
-	out["leadership"] = _scale(int(traits.get("leadership", 10)))
-	out["pressure"] = _scale(int(traits.get("pressure", 10)))
-	out["ego"] = _scale(int(traits.get("ego", 10)))
-	out["professionalism"] = _scale(int(traits.get("professionalism", 10)))
+			out[key] = 0.05
 
 	var characters: Array = PlayerTypes.characters_of(player)
 	var hot_head := characters.has(PlayerTypes.CHAR_HOT_HEAD)
@@ -167,19 +85,13 @@ static func _build(player: Dictionary, stamp: int) -> Dictionary:
 	out["professional"] = characters.has(PlayerTypes.CHAR_PROFESSIONAL)
 	out["ambitious"] = characters.has(PlayerTypes.CHAR_AMBITIOUS)
 
-	# Rough tackles come from temper, not from being bad at defending.
-	var foul := 0.35 + 0.5 * aggression + 0.3 * temperament - 0.25 * sportsmanship
-	if hot_head:
-		foul += 0.35
-	if ice_cold:
-		foul -= 0.2
-	out["foul_risk"] = clampf(foul, 0.15, 2.1)
-
-	var variance := 0.05 + 0.10 * (1.0 - float(out["poise"]))
+	# Character is the only personality source; no hidden numeric scales.
+	out["pressure"] = 0.5
+	out["ego"] = 0.5
+	out["foul_risk"] = 0.85 if hot_head else 0.3
+	var variance := 0.10
 	if out["inconsistent"]:
 		variance += 0.11
-	if out["professional"]:
-		variance -= 0.03
 	out["variance"] = clampf(variance, 0.03, 0.28)
 
 	out["recovery"] = _scale(PlayerTypes.recovery_of(player))

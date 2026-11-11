@@ -30,6 +30,9 @@ static func playoff_enabled(unit: Dictionary) -> bool:
 
 
 static func uses_overall_regular(unit: Dictionary) -> bool:
+	# The optional combined standings do not replace division-place prizes.
+	if str(unit.get("competition_type", "")) == CompetitionTypes.TYPE_DIVISIONS:
+		return false
 	if bool(unit.get("regular_season_enabled", false)):
 		return true
 	return int(unit.get("divisions_count", 1)) <= 1

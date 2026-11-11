@@ -2,10 +2,13 @@ extends Control
 ## New-game hub: tournament select, season clock, table / calendar / stats / preview / playoff / history.
 
 
+const CoachMarketViewScript := preload("res://scenes/game/coach_market_view.gd")
+
 const MAIN_MENU_PATH := "res://scenes/main_menu/main_menu.tscn"
 const SaveStoreScript := preload("res://game/save_store.gd")
-const WeSelectScene := preload("res://ui/components/we_select_field.tscn")
 const WeMessageScene := preload("res://ui/components/we_message_dialog.tscn")
+const LeagueMovementScript := preload("res://game/league_movement.gd")
+const PlayoffManagerScript := preload("res://game/playoff_manager.gd")
 const PlayoffBracketViewScript := preload("res://scenes/game/playoff_bracket_view.gd")
 const UnitSeasonStatsScript := preload("res://game/unit_season_stats.gd")
 
@@ -18,15 +21,28 @@ const TAB_HISTORY := 5
 
 const TABLE_MODE_DIVISIONS := "divisions"
 const TABLE_MODE_OVERALL := "overall"
+const TABLE_ZONE_PROMOTE := "promote"
+const TABLE_ZONE_PLAYOFF := "playoff"
+const TABLE_ZONE_RELEGATE := "relegate"
+const STANDINGS_LOGO := 22
+const STANDINGS_PLACE_W := 22
+const STANDINGS_STAT_W := 30
+const STANDINGS_GOALS_W := 58
+const STANDINGS_GD_W := 42
+const STANDINGS_PTS_W := 44
 const LOGO_SIZE := 30
 const LOGO_SIZE_CALENDAR := 22
 const CALENDAR_COLUMNS := 3
 
 @onready var _menu_button: WeButton = %MenuButton
 @onready var _tournament_select: WeSelectField = %TournamentSelect
+@onready var _nav_track: PanelContainer = %NavTrack
+@onready var _rating_link: WeButton = %NationalRatingLink
+@onready var _teams_link: WeButton = %TeamsLink
 @onready var _players_link: WeButton = %PlayersLink
 @onready var _market_link: WeButton = %MarketLink
 @onready var _transfers_link: WeButton = %TransfersLink
+@onready var _coaches_link: WeButton = %CoachesLink
 @onready var _header_card: PanelContainer = %HeaderCard
 @onready var _clock_frame: PanelContainer = %ClockFrame
 @onready var _season_label: Label = %SeasonLabel
@@ -46,11 +62,18 @@ const CALENDAR_COLUMNS := 3
 @onready var _coach_card: CoachCard = %CoachCard
 @onready var _players_view = %WorldPlayersView
 @onready var _transfers_view = %TransfersView
+@onready var _teams_view = %TeamsView
+
+var _coaches_view: VBoxContainer
+
+const NAV_HEIGHT := 38.0
 
 var _current_tab: int = TAB_TABLE
 var _suppress_select: bool = false
 var _message_dialog: WeMessageDialog
 var _table_mode: String = TABLE_MODE_DIVISIONS
+var _history_tab: int = 0
+var _stats_scope: int = 0
 var _logo_cache: Dictionary = {}
 var _menu_popup: PopupPanel
 var _menu_list: VBoxContainer
@@ -60,6 +83,7 @@ var _return_to_player_card: bool = false
 var _return_from_coach_card: bool = false
 var _return_to_coach_card: bool = false
 var _directory_mode: String = ""
+var _return_to_national_profile := 0
 var _return_to_directory: String = ""
 var _open_club_after_player: int = 0
 var _open_club_after_coach: int = 0
@@ -76,6 +100,25 @@ var _work_shield: Control
 
 
 func _ready() -> void:
+	_coaches_view = CoachMarketViewScript.new()
+	_coaches_view.logo_builder = func(id, edge): return _club_logo_rect({}, id, edge)
+	_coaches_view.name = "CoachMarketView"
+	_players_view.get_parent().add_child(_coaches_view)
+	_coaches_view.visible = false
+	_coaches_view.closed.connect(_close_directory)
+	_coaches_view.club_requested.connect(_on_players_view_club_requested)
+	_coaches_view.coach_requested.connect(_on_market_coach_requested)
+	_coaches_link.pressed.connect(func(): _toggle_directory("coaches"))
+	_teams_link.pressed.connect(func():
+		_teams_view.set_national(false)
+		_show_directory("teams"))
+	_rating_link.pressed.connect(func():
+		_teams_view.set_national(false, true)
+		_show_directory("ratings"))
+	_teams_view.club_requested.connect(_on_players_view_club_requested)
+	_teams_view.country_requested.connect(_on_players_view_country_requested)
+	_teams_view.closed.connect(_close_directory)
+	_teams_view.kind_changed.connect(_refresh_nav_links)
 	_work_shield = Control.new()
 	_work_shield.mouse_filter = Control.MOUSE_FILTER_STOP
 	_work_shield.z_index = 100
@@ -89,15 +132,13 @@ func _ready() -> void:
 		(_tournament_select.get_node("%Label") as CanvasItem).visible = false
 	_tournament_select.item_selected.connect(_on_tournament_selected)
 	_tournament_select.item_reselected.connect(_on_tournament_reselected)
-	_players_link.kind = WeButton.Kind.GHOST
-	_players_link.focus_mode = Control.FOCUS_NONE
+	for link in [_teams_link, _players_link, _market_link, _transfers_link, _coaches_link, _rating_link]:
+		link.kind = WeButton.Kind.GHOST
+		link.focus_mode = Control.FOCUS_NONE
 	_players_link.pressed.connect(_on_players_pressed)
-	_market_link.kind = WeButton.Kind.GHOST
-	_market_link.focus_mode = Control.FOCUS_NONE
 	_market_link.pressed.connect(_on_market_pressed)
-	_transfers_link.kind = WeButton.Kind.GHOST
-	_transfers_link.focus_mode = Control.FOCUS_NONE
 	_transfers_link.pressed.connect(_on_transfers_pressed)
+	_align_header_controls()
 	_tab_bar.tab_selected.connect(_on_tab_selected)
 	_advance_day_button.kind = WeButton.Kind.PRIMARY
 	_advance_day_button.pressed.connect(_on_advance_day_pressed)
@@ -120,6 +161,8 @@ func _ready() -> void:
 	_team_card.player_requested.connect(_on_team_card_player_requested)
 	_team_card.coach_requested.connect(_on_team_card_coach_requested)
 	_national_team_card.closed.connect(_on_national_team_card_closed)
+	_national_team_card.player_requested.connect(_on_national_player_requested)
+	_national_team_card.coach_requested.connect(_on_national_coach_requested)
 	_player_card.closed.connect(_on_player_card_closed)
 	_player_card.club_requested.connect(_on_player_card_club_requested)
 	_player_card.country_requested.connect(_on_player_card_country_requested)
@@ -166,6 +209,7 @@ func _apply_chrome_styles() -> void:
 		"panel",
 		WeTokens.panel(WeTokens.SURFACE, WeTokens.BORDER, WeTokens.RADIUS_LG, 0)
 	)
+	_style_nav_track()
 
 
 func _setup_message_dialog() -> void:
@@ -365,8 +409,8 @@ func _on_advance_day_pressed() -> void:
 		_message_dialog.open_info("Симуляция", str(result.get("error", "Не удалось продолжить игру.")))
 
 
-func _on_simulation_progress(stage: String, done: int, total: int) -> void:
-	_day_label.text = stage + (" · %d/%d" % [done, total] if total > 0 else "")
+func _on_simulation_progress(_stage: String, _done: int, _total: int) -> void:
+	_day_label.text = "День %d" % GameSession.season_day
 
 
 func _on_sim_button_pressed() -> void:
@@ -485,19 +529,19 @@ func _on_new_season_pressed() -> void:
 func _refresh_header() -> void:
 	var busy := GameSession.is_processing
 	_menu_button.disabled = busy
+	_teams_link.disabled = busy
+	_rating_link.disabled = busy
 	_players_link.disabled = busy
 	_market_link.disabled = busy
 	_transfers_link.disabled = busy
+	_coaches_link.disabled = busy
 	_tournament_select.editable = not busy
 	if _work_shield != null:
 		_work_shield.visible = busy
 	if busy:
 		get_viewport().gui_release_focus()
 	_season_label.text = "Сезон %d" % GameSession.season_number
-	if GameSession.is_market_day():
-		_day_label.text = "День %d · рынок" % GameSession.season_day
-	else:
-		_day_label.text = "День %d" % GameSession.season_day
+	_day_label.text = "День %d" % GameSession.season_day
 	_total_days_label.text = "из %d" % GameSession.season_total_days
 
 	var running := _sim_mode != SIM_OFF
@@ -515,6 +559,8 @@ func _refresh_header() -> void:
 func _refresh_tabs(keep_selection: bool) -> void:
 	var unit := GameSession.get_selected_unit()
 	var titles := PackedStringArray(["Таблица", "Календарь", "Статистика", "Превью"])
+	if NationalTeams.is_unit(unit):
+		titles[0] = "Группы"
 	var playoff_enabled := bool(unit.get("playoff", {}).get("enabled", false))
 	if playoff_enabled:
 		titles.append("Плей-офф")
@@ -635,7 +681,14 @@ func _show_directory(mode: String) -> void:
 	if _coach_card != null:
 		_coach_card.visible = false
 	_hide_directory_views()
-	if mode == "transfers":
+	if mode in ["teams", "ratings"]:
+		if _teams_view != null:
+			_teams_view.visible = true
+			_teams_view.refresh()
+	elif mode == "coaches":
+		_coaches_view.visible = true
+		_coaches_view.refresh()
+	elif mode == "transfers":
 		if _transfers_view != null:
 			_transfers_view.visible = true
 			_transfers_view.refresh()
@@ -686,12 +739,23 @@ func _toggle_directory(mode: String) -> void:
 
 
 func _directory_view_visible(mode: String) -> bool:
+	if mode in ["teams", "ratings"]:
+		return _teams_view != null and _teams_view.visible
+	if mode == "coaches":
+		return _coaches_view.visible
 	if mode == "transfers":
 		return _transfers_view != null and _transfers_view.visible
 	return _players_view != null and _players_view.visible
 
 
 func _refresh_open_directory() -> void:
+	if _directory_mode in ["teams", "ratings"]:
+		if _teams_view != null:
+			_teams_view.refresh()
+		return
+	if _directory_mode == "coaches":
+		_coaches_view.refresh()
+		return
 	if _directory_mode == "transfers":
 		if _transfers_view != null:
 			_transfers_view.refresh()
@@ -701,6 +765,10 @@ func _refresh_open_directory() -> void:
 
 
 func _hide_directory_views() -> void:
+	if _teams_view != null:
+		_teams_view.visible = false
+	if _coaches_view != null:
+		_coaches_view.visible = false
 	if _players_view != null:
 		_players_view.visible = false
 	if _transfers_view != null:
@@ -708,38 +776,83 @@ func _hide_directory_views() -> void:
 
 
 func _refresh_nav_links() -> void:
+	_style_nav_link(_teams_link, _directory_mode == "teams")
+	_style_nav_link(_rating_link, _directory_mode == "ratings")
+	_style_nav_link(_coaches_link, _directory_mode == "coaches")
 	_style_nav_link(_players_link, _directory_mode == "players")
 	_style_nav_link(_market_link, _directory_mode == "market")
 	_style_nav_link(_transfers_link, _directory_mode == "transfers")
 
 
+func _align_header_controls() -> void:
+	var chrome := _tournament_select.get_node_or_null("%Chrome") as Control
+	if chrome != null:
+		chrome.custom_minimum_size.y = NAV_HEIGHT
+	if _nav_track != null:
+		_nav_track.custom_minimum_size.y = NAV_HEIGHT
+	if _menu_button != null:
+		_menu_button.custom_minimum_size = Vector2(NAV_HEIGHT, NAV_HEIGHT)
+	if _clock_frame != null:
+		_clock_frame.custom_minimum_size.y = NAV_HEIGHT
+
+
+func _style_nav_track() -> void:
+	if _nav_track == null:
+		return
+	var box := StyleBoxFlat.new()
+	box.bg_color = WeTokens.INSET
+	box.set_border_width_all(1)
+	box.border_color = WeTokens.BORDER_STRONG
+	box.set_corner_radius_all(12)
+	box.content_margin_left = 3
+	box.content_margin_right = 3
+	box.content_margin_top = 3
+	box.content_margin_bottom = 3
+	_nav_track.add_theme_stylebox_override("panel", WeTokens.polish_style(box))
+	_nav_track.custom_minimum_size.y = NAV_HEIGHT
+
+
 func _style_nav_link(button: WeButton, selected: bool) -> void:
 	if button == null:
 		return
-	var normal := _hub_nav_box(
-		WeTokens.ACCENT_SOFT if selected else Color(1, 1, 1, 0.05),
-		Color(WeTokens.ACCENT.r, WeTokens.ACCENT.g, WeTokens.ACCENT.b, 0.4) if selected else WeTokens.BORDER_STRONG
+	button.custom_minimum_size.y = NAV_HEIGHT - 6.0
+	button.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	button.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	button.clip_contents = true
+	var face := WeTokens.font_semibold()
+	if face != null:
+		button.add_theme_font_override("font", face)
+	var normal := _nav_segment(
+		WeTokens.ACCENT_SOFT_STRONG if selected else Color(0, 0, 0, 0),
+		Color(WeTokens.ACCENT.r, WeTokens.ACCENT.g, WeTokens.ACCENT.b, 0.55) if selected else Color(0, 0, 0, 0)
 	)
-	var hover := _hub_nav_box(Color(1, 1, 1, 0.1), WeTokens.BORDER)
+	var hover := _nav_segment(
+		WeTokens.ACCENT_SOFT if selected else Color(1, 1, 1, 0.08),
+		Color(WeTokens.ACCENT.r, WeTokens.ACCENT.g, WeTokens.ACCENT.b, 0.75) if selected else Color(1, 1, 1, 0.1)
+	)
 	button.add_theme_stylebox_override("normal", normal)
 	button.add_theme_stylebox_override("hover", hover)
-	button.add_theme_stylebox_override("pressed", normal)
+	button.add_theme_stylebox_override("pressed", hover)
 	button.add_theme_stylebox_override("focus", hover)
+	button.add_theme_stylebox_override("disabled", _nav_segment(Color(1, 1, 1, 0.03), Color(0, 0, 0, 0)))
 	button.add_theme_color_override("font_color", WeTokens.ACCENT if selected else WeTokens.TEXT)
-	button.add_theme_color_override("font_hover_color", WeTokens.TEXT)
-	button.add_theme_font_size_override("font_size", 14)
+	button.add_theme_color_override("font_hover_color", Color(1, 1, 1, 1))
+	button.add_theme_color_override("font_pressed_color", WeTokens.ACCENT if selected else WeTokens.TEXT)
+	button.add_theme_color_override("font_disabled_color", WeTokens.TEXT_DIM)
+	button.add_theme_font_size_override("font_size", 13)
 
 
-func _hub_nav_box(bg: Color, border: Color) -> StyleBoxFlat:
+func _nav_segment(bg: Color, border: Color) -> StyleBoxFlat:
 	var box := StyleBoxFlat.new()
 	box.bg_color = bg
-	box.set_border_width_all(1)
-	box.border_color = border
-	box.set_corner_radius_all(WeTokens.RADIUS_SM)
-	box.content_margin_left = 16
-	box.content_margin_right = 16
-	box.content_margin_top = 8
-	box.content_margin_bottom = 8
+	if border.a > 0.0:
+		box.set_border_width_all(1)
+		box.border_color = border
+	box.set_corner_radius_all(9)
+	box.content_margin_left = 14
+	box.content_margin_right = 14
+	box.content_margin_top = 0
+	box.content_margin_bottom = 0
 	return WeTokens.polish_style(box)
 
 
@@ -791,6 +904,7 @@ func _on_team_card_coach_requested(coach_id: int) -> void:
 func _on_player_card_club_requested(club_id: int) -> void:
 	if club_id < 1:
 		return
+	_return_to_national_profile = 0
 	_open_club_after_player = club_id
 	_return_from_player_card = false
 	_return_to_player_card = false
@@ -807,6 +921,9 @@ func _on_player_card_country_requested(country_id: int) -> void:
 
 
 func _on_player_card_closed() -> void:
+	if _return_to_national_profile > 0 and _open_club_after_player == 0:
+		_restore_national_profile()
+		return
 	if _open_club_after_player > 0:
 		var club_id := _open_club_after_player
 		_open_club_after_player = 0
@@ -837,6 +954,7 @@ func _on_player_card_closed() -> void:
 func _on_coach_card_club_requested(club_id: int) -> void:
 	if club_id < 1:
 		return
+	_return_to_national_profile = 0
 	_open_club_after_coach = club_id
 	_return_from_coach_card = false
 	_return_to_coach_card = false
@@ -853,6 +971,9 @@ func _on_coach_card_country_requested(country_id: int) -> void:
 
 
 func _on_coach_card_closed() -> void:
+	if _return_to_national_profile > 0 and _open_club_after_coach == 0:
+		_restore_national_profile()
+		return
 	if _open_club_after_coach > 0:
 		var club_id := _open_club_after_coach
 		_open_club_after_coach = 0
@@ -870,6 +991,9 @@ func _on_coach_card_closed() -> void:
 		_team_card.resume()
 		return
 	_return_from_coach_card = false
+	if _return_to_directory == "coaches":
+		_restore_directory()
+		return
 	_show_tournament_view()
 	_rebuild_content()
 
@@ -938,6 +1062,9 @@ func _close_overlay_cards() -> void:
 
 func _on_players_view_player_requested(player_id: int) -> void:
 	if player_id < 1:
+		return
+	if GameSession.get_player_profile(player_id).is_empty():
+		_message_dialog.open_info("Карточка не хранится", "Игрок завершил карьеру без сыгранных матчей. Запись о трансфере сохранена, полная карточка удалена.")
 		return
 	_return_to_directory = _directory_mode
 	_show_player_card_view()
@@ -1061,45 +1188,160 @@ func _show_fatal(message: String) -> void:
 
 
 func _build_table_view(unit: Dictionary) -> void:
+	if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
+		_content.add_child(_hint_label("Жеребьёвка групп состоится перед стартом турнира после клубных финалов."))
+		return
 	var divisions: Array = unit.get("divisions", [])
 
 	if divisions.is_empty() or (unit.get("standings", []) as Array).is_empty():
 		_content.add_child(_hint_label("В турнире пока нет клубов. Добавьте их в редакторе мира."))
 		return
 
+	var zones := _standing_zones(unit)
 	var multi_div := divisions.size() > 1
-	if multi_div:
-		_content.add_child(_make_table_mode_select())
+	var toolbar := _standings_toolbar(multi_div, zones, unit)
+	if toolbar != null:
+		_content.add_child(toolbar)
 
 	if multi_div and _table_mode == TABLE_MODE_DIVISIONS:
-		_content.add_child(_divisions_two_columns(unit, divisions))
+		_content.add_child(_divisions_two_columns(unit, divisions, zones))
 	elif multi_div and _table_mode == TABLE_MODE_OVERALL:
-		_content.add_child(_section_title("Общая таблица"))
-		_content.add_child(_standings_table(unit, -1))
+		_content.add_child(_standings_card(unit, -1, "Общая таблица", zones))
 	else:
-		_content.add_child(_standings_table(unit, 0 if not divisions.is_empty() else -1))
+		_content.add_child(_standings_card(unit, 0 if not divisions.is_empty() else -1, "", zones))
 
 
-func _make_table_mode_select() -> WeSelectField:
-	var select := WeSelectScene.instantiate() as WeSelectField
-	select.label = "Вид таблицы"
-	select.compact = true
-	select.custom_minimum_size = Vector2(240, 0)
-	select.set_items([
-		{"id": TABLE_MODE_DIVISIONS, "label": "Дивизионы"},
-		{"id": TABLE_MODE_OVERALL, "label": "Общая таблица"},
-	], _table_mode)
-	select.item_selected.connect(func(_index: int):
-		var mode: Variant = select.selected_id
-		if mode == null:
+func _standing_zones(unit: Dictionary) -> Dictionary:
+	var zones: Dictionary = {}
+	var movement: Dictionary = LeagueMovementScript.zone_club_ids(unit, GameSession.sorted_standings)
+	for club_id in movement.get("relegate", []):
+		zones[int(club_id)] = TABLE_ZONE_RELEGATE
+	for club_id in PlayoffManagerScript.qualifier_ids(unit):
+		zones[int(club_id)] = TABLE_ZONE_PLAYOFF
+	for club_id in movement.get("promote", []):
+		zones[int(club_id)] = TABLE_ZONE_PROMOTE
+	return zones
+
+
+func _standings_toolbar(multi_div: bool, zones: Dictionary, unit: Dictionary = {}) -> Control:
+	var kinds := _standings_zone_kinds(zones)
+	if not multi_div and kinds.is_empty():
+		return null
+
+	var bar := HBoxContainer.new()
+	bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bar.alignment = BoxContainer.ALIGNMENT_CENTER
+	bar.add_theme_constant_override("separation", 18)
+	if multi_div:
+		bar.add_child(_table_mode_switch(unit))
+	if not kinds.is_empty():
+		bar.add_child(_standings_legend(kinds))
+	return bar
+
+
+func _table_mode_switch(unit: Dictionary = {}) -> PanelContainer:
+	var pill := PanelContainer.new()
+	pill.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	pill.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	pill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pill.add_theme_stylebox_override("panel", WeTokens.fill(WeTokens.INSET, 8, 3, 3))
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 2)
+	pill.add_child(row)
+	row.add_child(_table_mode_chip("Группы" if NationalTeams.is_unit(unit) else "Дивизионы", TABLE_MODE_DIVISIONS))
+	row.add_child(_table_mode_chip("Общая таблица", TABLE_MODE_OVERALL))
+	return pill
+
+
+func _table_mode_chip(text: String, mode: String) -> Button:
+	var on := _table_mode == mode
+	var button := Button.new()
+	button.text = text
+	button.focus_mode = Control.FOCUS_NONE
+	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	button.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	var normal := _mode_chip_style(on, false)
+	button.add_theme_stylebox_override("normal", normal)
+	button.add_theme_stylebox_override("hover", _mode_chip_style(on, true))
+	button.add_theme_stylebox_override("pressed", _mode_chip_style(true, false))
+	button.add_theme_stylebox_override("focus", normal)
+	var color := WeTokens.ACCENT if on else WeTokens.TEXT_MUTED
+	button.add_theme_color_override("font_color", color)
+	button.add_theme_color_override("font_hover_color", WeTokens.ACCENT if on else WeTokens.TEXT)
+	button.add_theme_color_override("font_pressed_color", WeTokens.ACCENT)
+	button.add_theme_font_size_override("font_size", 12)
+	if on:
+		_apply_semibold(button)
+	button.pressed.connect(func() -> void:
+		if _table_mode == mode:
 			return
-		_table_mode = str(mode)
+		_table_mode = mode
 		_rebuild_content()
 	)
-	return select
+	return button
 
 
-func _divisions_two_columns(unit: Dictionary, divisions: Array) -> HBoxContainer:
+func _mode_chip_style(on: bool, hover: bool) -> StyleBoxFlat:
+	var bg := Color(0, 0, 0, 0)
+	if on:
+		bg = WeTokens.ACCENT_SOFT_STRONG
+	elif hover:
+		bg = Color(1, 1, 1, 0.06)
+	return WeTokens.fill(bg, 7, 12, 4)
+
+
+func _standings_zone_kinds(zones: Dictionary) -> PackedStringArray:
+	var has := {
+		TABLE_ZONE_PROMOTE: false,
+		TABLE_ZONE_PLAYOFF: false,
+		TABLE_ZONE_RELEGATE: false,
+	}
+	for zone in zones.values():
+		var key := str(zone)
+		if has.has(key):
+			has[key] = true
+	var kinds := PackedStringArray()
+	for key in [TABLE_ZONE_PROMOTE, TABLE_ZONE_PLAYOFF, TABLE_ZONE_RELEGATE]:
+		if bool(has[key]):
+			kinds.append(key)
+	return kinds
+
+
+func _standings_legend(kinds: PackedStringArray) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	row.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_theme_constant_override("separation", 14)
+	for kind in kinds:
+		row.add_child(_standings_legend_item(kind))
+	return row
+
+
+func _standings_legend_item(kind: String) -> HBoxContainer:
+	var item := HBoxContainer.new()
+	item.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	item.alignment = BoxContainer.ALIGNMENT_CENTER
+	item.add_theme_constant_override("separation", 6)
+	item.tooltip_text = _zone_hint(kind)
+	item.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var dot := PanelContainer.new()
+	dot.custom_minimum_size = Vector2(8, 8)
+	dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dot.add_theme_stylebox_override("panel", WeTokens.fill(_zone_color(kind), 4, 0, 0))
+	item.add_child(dot)
+
+	var label := Label.new()
+	label.text = _zone_caption(kind)
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.add_theme_color_override("font_color", WeTokens.TEXT_MUTED)
+	label.add_theme_font_size_override("font_size", 12)
+	item.add_child(label)
+	return item
+
+
+func _divisions_two_columns(unit: Dictionary, divisions: Array, zones: Dictionary) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", 14)
@@ -1107,12 +1349,12 @@ func _divisions_two_columns(unit: Dictionary, divisions: Array) -> HBoxContainer
 	var left := VBoxContainer.new()
 	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	left.size_flags_stretch_ratio = 1.0
-	left.add_theme_constant_override("separation", 14)
+	left.add_theme_constant_override("separation", 12)
 
 	var right := VBoxContainer.new()
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	right.size_flags_stretch_ratio = 1.0
-	right.add_theme_constant_override("separation", 14)
+	right.add_theme_constant_override("separation", 12)
 
 	row.add_child(left)
 	row.add_child(right)
@@ -1121,72 +1363,256 @@ func _divisions_two_columns(unit: Dictionary, divisions: Array) -> HBoxContainer
 		var division: Dictionary = divisions[i]
 		var div_index: int = int(division.get("index", i))
 		var col: VBoxContainer = left if i % 2 == 0 else right
-		var block := VBoxContainer.new()
-		block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		block.add_theme_constant_override("separation", 6)
-		block.add_child(_section_title("Дивизион %d" % (div_index + 1)))
-		block.add_child(_standings_table(unit, div_index))
-		col.add_child(block)
+		col.add_child(_standings_card(unit, div_index, ("Группа %d" if NationalTeams.is_unit(unit) else "Дивизион %d") % (div_index + 1), zones))
 
 	return row
 
 
-func _standings_table(unit: Dictionary, division: int) -> PanelContainer:
-	var panel := _surface_panel()
+func _standings_card(unit: Dictionary, division: int, title: String, zones: Dictionary) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.clip_contents = true
+	panel.add_theme_stylebox_override(
+		"panel",
+		WeTokens.panel(WeTokens.SURFACE, WeTokens.BORDER, 12, 1)
+	)
 	var root := VBoxContainer.new()
 	root.add_theme_constant_override("separation", 0)
 	panel.add_child(root)
-	root.add_child(_table_header_row())
+	if not title.is_empty():
+		root.add_child(_standings_title(title))
+	root.add_child(_standings_columns())
 
 	var rows := GameSession.sorted_standings(unit, division)
 	if rows.is_empty():
-		root.add_child(_hint_label("Пусто"))
+		var empty := MarginContainer.new()
+		empty.add_theme_constant_override("margin_left", 12)
+		empty.add_theme_constant_override("margin_top", 8)
+		empty.add_theme_constant_override("margin_bottom", 8)
+		empty.add_child(_hint_label("Пусто"))
+		root.add_child(empty)
 		return panel
 
 	for i in rows.size():
-		root.add_child(_table_data_row(unit, rows[i], i + 1, i % 2 == 1))
+		var standing: Dictionary = rows[i]
+		var club_id := int(standing.get("club_id", 0))
+		root.add_child(_standings_row(
+			unit,
+			standing,
+			i + 1,
+			str(zones.get(club_id, "")),
+			i == rows.size() - 1
+		))
 	return panel
 
 
-func _table_header_row() -> PanelContainer:
-	var row := PanelContainer.new()
-	row.add_theme_stylebox_override("panel", WeTokens.fill(WeTokens.INSET, 0, 8, 6))
-	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 6)
-	row.add_child(cols)
-	cols.add_child(_col_label("#", 28, WeTokens.TEXT_DIM))
-	cols.add_child(_col_label("", LOGO_SIZE + 4, WeTokens.TEXT_DIM))
-	cols.add_child(_col_label("Клуб", 0, WeTokens.TEXT_DIM, true))
-	for title in ["И", "В", "Н", "П", "Мячи", "РМ", "О"]:
-		cols.add_child(_col_label(title, 40, WeTokens.TEXT_DIM))
+func _standings_title(title: String) -> PanelContainer:
+	var band := PanelContainer.new()
+	var box := WeTokens.fill(Color(1, 1, 1, 0.04), 0, 12, 8)
+	band.add_theme_stylebox_override("panel", box)
+	var label := Label.new()
+	label.text = title
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.add_theme_color_override("font_color", WeTokens.TEXT)
+	label.add_theme_font_size_override("font_size", 13)
+	_apply_semibold(label)
+	band.add_child(label)
+	return band
+
+
+func _standings_columns() -> HBoxContainer:
+	var row := _standings_shell(Color(0, 0, 0, 0.16), Color(1, 1, 1, 0.06), true, Color(0, 0, 0, 0.16))
+	var cols := _standings_line()
+	_standings_body(row).add_child(cols)
+	cols.add_child(_standings_value("#", STANDINGS_PLACE_W, WeTokens.TEXT_DIM))
+	cols.add_child(_standings_logo_gap())
+	cols.add_child(_standings_value("Клуб", 0, WeTokens.TEXT_DIM, false, true))
+	for title in ["И", "В", "Н", "П"]:
+		cols.add_child(_standings_value(title, STANDINGS_STAT_W, WeTokens.TEXT_DIM))
+	cols.add_child(_standings_value("Мячи", STANDINGS_GOALS_W, WeTokens.TEXT_DIM))
+	cols.add_child(_standings_value("РМ", STANDINGS_GD_W, WeTokens.TEXT_DIM))
+	cols.add_child(_standings_value("О", STANDINGS_PTS_W, WeTokens.ACCENT))
 	return row
 
 
-func _table_data_row(unit: Dictionary, standing: Dictionary, place: int, zebra: bool) -> PanelContainer:
-	var row := PanelContainer.new()
-	var bg := Color(1, 1, 1, 0.03) if zebra else Color(0, 0, 0, 0)
-	row.add_theme_stylebox_override("panel", WeTokens.fill(bg, 0, 8, 6))
-	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 6)
-	row.add_child(cols)
+func _standings_row(
+	unit: Dictionary,
+	standing: Dictionary,
+	place: int,
+	zone: String,
+	last: bool
+) -> HBoxContainer:
+	var bg := Color(0, 0, 0, 0)
+	var stripe := Color(0, 0, 0, 0)
+	if not zone.is_empty():
+		var tone := _zone_color(zone)
+		bg = Color(tone.r, tone.g, tone.b, 0.16)
+		stripe = tone
+	var row := _standings_shell(bg, Color(1, 1, 1, 0.05), not last, stripe)
+	if not zone.is_empty():
+		row.tooltip_text = _zone_hint(zone)
+	var cols := _standings_line()
+	_standings_body(row).add_child(cols)
 
-	var club_id: int = int(standing.get("club_id", 0))
-	cols.add_child(_col_label(str(place), 28, WeTokens.TEXT_MUTED))
-	cols.add_child(_club_logo_rect(unit, club_id, LOGO_SIZE))
-	cols.add_child(_club_link(unit, club_id))
-	cols.add_child(_col_label(str(standing.get("played", 0)), 40, WeTokens.TEXT))
-	cols.add_child(_col_label(str(standing.get("won", 0)), 40, WeTokens.TEXT))
-	cols.add_child(_col_label(str(standing.get("drawn", 0)), 40, WeTokens.TEXT))
-	cols.add_child(_col_label(str(standing.get("lost", 0)), 40, WeTokens.TEXT))
-	cols.add_child(_col_label("%d:%d" % [
+	var club_id := int(standing.get("club_id", 0))
+	var place_color := stripe if not zone.is_empty() else WeTokens.TEXT_MUTED
+	var place_label := _standings_value(str(place), STANDINGS_PLACE_W, place_color, true)
+	cols.add_child(place_label)
+	cols.add_child(_club_logo_rect(unit, club_id, STANDINGS_LOGO))
+	var link := _club_link(unit, club_id)
+	if not zone.is_empty():
+		link.tooltip_text = _zone_hint(zone)
+	cols.add_child(link)
+	cols.add_child(_standings_value(str(standing.get("played", 0)), STANDINGS_STAT_W, WeTokens.TEXT_MUTED))
+	cols.add_child(_standings_value(str(standing.get("won", 0)), STANDINGS_STAT_W, WeTokens.TEXT))
+	cols.add_child(_standings_value(str(standing.get("drawn", 0)), STANDINGS_STAT_W, WeTokens.TEXT_MUTED))
+	cols.add_child(_standings_value(str(standing.get("lost", 0)), STANDINGS_STAT_W, WeTokens.TEXT_MUTED))
+	cols.add_child(_standings_value("%d:%d" % [
 		int(standing.get("goals_for", 0)),
 		int(standing.get("goals_against", 0)),
-	], 40, WeTokens.TEXT))
-	var gd: int = int(standing.get("goal_diff", 0))
+	], STANDINGS_GOALS_W, WeTokens.TEXT))
+	var gd := int(standing.get("goal_diff", 0))
 	var gd_text := ("+%d" % gd) if gd > 0 else str(gd)
-	cols.add_child(_col_label(gd_text, 40, WeTokens.TEXT))
-	cols.add_child(_col_label(str(standing.get("points", 0)), 40, WeTokens.ACCENT))
+	var gd_color := WeTokens.TEXT_MUTED
+	if gd > 0:
+		gd_color = WeTokens.SUCCESS
+	elif gd < 0:
+		gd_color = WeTokens.DANGER
+	cols.add_child(_standings_value(gd_text, STANDINGS_GD_W, gd_color))
+	cols.add_child(_points_badge(str(standing.get("points", 0))))
 	return row
+
+
+func _standings_shell(bg: Color, line: Color, draw_line: bool, stripe: Color = Color(0, 0, 0, 0)) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("separation", 0)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+
+	var mark := ColorRect.new()
+	mark.custom_minimum_size = Vector2(3, 0)
+	mark.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	mark.color = stripe
+	row.add_child(mark)
+
+	var body := PanelContainer.new()
+	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var box := WeTokens.fill(bg, 0, 0, 0)
+	box.content_margin_left = 8
+	box.content_margin_right = 10
+	box.content_margin_top = 5
+	box.content_margin_bottom = 5
+	if draw_line:
+		box.border_width_bottom = 1
+		box.border_color = line
+		box.content_margin_bottom = 6
+	body.add_theme_stylebox_override("panel", box)
+	row.add_child(body)
+	return row
+
+
+func _standings_body(row: HBoxContainer) -> PanelContainer:
+	return row.get_child(1) as PanelContainer
+
+
+func _standings_line() -> HBoxContainer:
+	var cols := HBoxContainer.new()
+	cols.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cols.alignment = BoxContainer.ALIGNMENT_CENTER
+	cols.add_theme_constant_override("separation", 8)
+	return cols
+
+
+func _standings_logo_gap() -> Control:
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(STANDINGS_LOGO, STANDINGS_LOGO)
+	gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return gap
+
+
+func _standings_value(
+	text: String,
+	width: int,
+	color: Color,
+	strong: bool = false,
+	expand: bool = false
+) -> Label:
+	var label := Label.new()
+	label.text = text
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.add_theme_color_override("font_color", color)
+	label.add_theme_font_size_override("font_size", 12)
+	label.clip_text = true
+	label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.custom_minimum_size.y = 20
+	if strong:
+		_apply_semibold(label)
+	if expand:
+		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	else:
+		label.custom_minimum_size.x = width
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	return label
+
+
+func _points_badge(text: String) -> PanelContainer:
+	var pill := PanelContainer.new()
+	pill.custom_minimum_size = Vector2(STANDINGS_PTS_W, 0)
+	pill.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	pill.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	pill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pill.add_theme_stylebox_override("panel", WeTokens.fill(WeTokens.ACCENT_SOFT, 6, 0, 1))
+	var label := _standings_value(text, 0, WeTokens.ACCENT, true)
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pill.add_child(label)
+	return pill
+
+
+func _zone_color(zone: String) -> Color:
+	match zone:
+		TABLE_ZONE_PROMOTE:
+			return WeTokens.SUCCESS
+		TABLE_ZONE_PLAYOFF:
+			return Color(0.95, 0.74, 0.34)
+		TABLE_ZONE_RELEGATE:
+			return WeTokens.DANGER
+		_:
+			return Color(0, 0, 0, 0)
+
+
+func _zone_caption(zone: String) -> String:
+	match zone:
+		TABLE_ZONE_PROMOTE:
+			return "Повышение"
+		TABLE_ZONE_PLAYOFF:
+			return "Плей-офф"
+		TABLE_ZONE_RELEGATE:
+			return "Понижение"
+		_:
+			return ""
+
+
+func _zone_hint(zone: String) -> String:
+	match zone:
+		TABLE_ZONE_PROMOTE:
+			return "Зона повышения в лигу выше"
+		TABLE_ZONE_PLAYOFF:
+			return "Зона плей-офф"
+		TABLE_ZONE_RELEGATE:
+			return "Зона понижения в лигу ниже"
+		_:
+			return ""
+
+
+func _apply_semibold(control: Control) -> void:
+	var font := WeTokens.font_semibold()
+	if font != null:
+		control.add_theme_font_override("font", font)
 
 
 func _club_link(unit: Dictionary, club_id: int) -> Button:
@@ -1227,14 +1653,14 @@ func _club_logo_rect(unit: Dictionary, club_id: int, size: int) -> Control:
 
 
 func _club_logo_texture(unit: Dictionary, club_id: int, _size: int) -> Texture2D:
-	var cache_key := str(club_id)
+	var clubs: Dictionary = unit.get("clubs_by_id", {})
+	var club: Dictionary = clubs.get(club_id, {})
+	if club.is_empty():
+		club = GameSession.get_club_identity(club_id)
+	var path := str(club.get("logo_path", "")).strip_edges()
+	var cache_key := "%d:%s" % [club_id, path]
 	if _logo_cache.has(cache_key):
 		return _logo_cache[cache_key]
-	var clubs: Dictionary = unit.get("clubs_by_id", {})
-	if not clubs.has(club_id):
-		_logo_cache[cache_key] = null
-		return null
-	var path := str(clubs[club_id].get("logo_path", "")).strip_edges()
 	if path.is_empty():
 		_logo_cache[cache_key] = null
 		return null
@@ -1251,15 +1677,53 @@ func _club_logo_texture(unit: Dictionary, club_id: int, _size: int) -> Texture2D
 
 
 func _open_club_card(unit: Dictionary, club_id: int) -> void:
+	if NationalTeams.is_team(club_id):
+		_show_national_team_card_view()
+		_national_team_card.open_for(club_id - NationalTeams.TEAM_ID_BASE)
+		return
 	_show_team_card_view()
 	_team_card.open_for(unit, club_id)
 
 
 func _build_stats_view(unit: Dictionary) -> void:
-	if not UnitSeasonStatsScript.has_leaders(unit):
-		_content.add_child(_hint_label(
-			"Матчей ещё не было — бомбардиры и остальные лидеры появятся после первого тура."
-		))
+	var tabs := WeTabBar.new()
+	tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tabs.set_tabs(PackedStringArray(["Текущий сезон", "Всё время"]))
+	tabs.select(_stats_scope, false)
+	tabs.tab_selected.connect(func(index: int) -> void:
+		if _stats_scope == index:
+			return
+		_stats_scope = index
+		_rebuild_content()
+	)
+	_content.add_child(tabs)
+
+	if _stats_scope == 0:
+		_build_stats_boards(unit, null, "Матчей ещё не было — бомбардиры и остальные лидеры появятся после первого тура.")
+		return
+
+	var career := GameSession.career_player_stats(unit)
+	if not bool(career.get("ok", false)):
+		_content.add_child(_hint_label(str(career.get("error", "Не удалось прочитать архив турнира."))))
+		return
+	_content.add_child(_dense_hint(
+		"Все сезоны этого турнира. Если игрок менял клуб, показан тот, за который он сыграл больше матчей."
+	))
+	_build_stats_boards(
+		unit,
+		career.get("bag", {}),
+		"В этом турнире ещё нет статистики — лидеры появятся после первых матчей."
+	)
+
+
+func _build_stats_boards(unit: Dictionary, bag: Variant, empty_text: String) -> void:
+	var has_rows := false
+	if bag == null:
+		has_rows = UnitSeasonStatsScript.has_leaders(unit)
+	else:
+		has_rows = UnitSeasonStatsScript.has_leaders_in(bag)
+	if not has_rows:
+		_content.add_child(_hint_label(empty_text))
 		return
 
 	var grid := GridContainer.new()
@@ -1272,49 +1736,75 @@ func _build_stats_view(unit: Dictionary) -> void:
 	for board in UnitSeasonStatsScript.BOARDS:
 		if typeof(board) != TYPE_DICTIONARY:
 			continue
-		var block := _stats_board(unit, board)
+		var block := _stats_board(unit, board, 0, 12, bag)
 		block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		grid.add_child(block)
 
 
-func _stats_board(unit: Dictionary, board: Dictionary) -> Control:
-	var block := VBoxContainer.new()
-	block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	block.add_theme_constant_override("separation", 4)
+func _stats_board(unit: Dictionary, board: Dictionary, offset: int = 0, limit: int = 12, bag: Variant = null) -> Control:
 	var field := str(board.get("field", ""))
 	var column := str(board.get("column", ""))
-	block.add_child(_section_title(str(board.get("title", ""))))
+	var root := _report_card(str(board.get("title", "")))
+	var panel := root.get_parent() as PanelContainer
 
-	var panel := _tight_panel()
-	var root := VBoxContainer.new()
-	root.add_theme_constant_override("separation", 0)
-	panel.add_child(root)
-	block.add_child(panel)
-
-	var rows := UnitSeasonStatsScript.leaders(unit, field)
+	var ranked: Array = UnitSeasonStatsScript.leaders_in(bag, field, offset + limit) if bag != null else UnitSeasonStatsScript.leaders(unit, field, offset + limit)
+	var rows := ranked.slice(offset, offset + limit)
 	root.add_child(_stats_header_row(column))
 	if rows.is_empty():
 		root.add_child(_hint_label("Пока нет"))
-		return block
+		return panel
 
 	for i in rows.size():
-		root.add_child(_stats_data_row(unit, rows[i], i + 1, field, i % 2 == 1))
-	return block
+		root.add_child(_stats_data_row(unit, rows[i], offset + i + 1, field, i % 2 == 1))
+	return panel
+
+
+func _report_card(title: String, note: String = "") -> VBoxContainer:
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	panel.clip_contents = true
+	panel.add_theme_stylebox_override("panel", WeTokens.panel(WeTokens.SURFACE, WeTokens.BORDER, 12, 1))
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 0)
+	panel.add_child(root)
+	root.add_child(_standings_title(title))
+	if not note.is_empty():
+		var band := PanelContainer.new()
+		band.add_theme_stylebox_override("panel", WeTokens.fill(Color(1, 1, 1, 0.02), 0, 12, 6))
+		var hint := _dense_hint(note)
+		hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		band.add_child(hint)
+		root.add_child(band)
+	return root
+
+
+func _report_row(header: bool = false, leader: bool = false) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
+	var bg := Color(0, 0, 0, 0.16) if header else Color(0, 0, 0, 0)
+	var stripe := Color(0, 0, 0, 0.16) if header else Color(0, 0, 0, 0)
+	if leader and not header:
+		bg = Color(WeTokens.ACCENT.r, WeTokens.ACCENT.g, WeTokens.ACCENT.b, 0.10)
+		stripe = WeTokens.ACCENT
+	var shell := _standings_shell(bg, Color(1, 1, 1, 0.05), true, stripe)
+	panel.add_child(shell)
+	var cols := _standings_line()
+	_standings_body(shell).add_child(cols)
+	panel.set_meta("columns", cols)
+	return panel
 
 
 func _stats_header_row(column: String) -> PanelContainer:
-	var row := PanelContainer.new()
-	row.add_theme_stylebox_override("panel", WeTokens.fill(WeTokens.INSET, 0, 4, 2))
-	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 4)
-	_center_row(cols)
-	row.add_child(cols)
-	cols.add_child(_dense_label("#", 16, WeTokens.TEXT_DIM))
-	cols.add_child(_dense_label("Игрок", 0, WeTokens.TEXT_DIM, true))
-	var club := _dense_label("Клуб", 58, WeTokens.TEXT_DIM)
+	var row := _report_row(true)
+	var cols: HBoxContainer = row.get_meta("columns")
+	cols.add_child(_standings_value("#", STANDINGS_PLACE_W, WeTokens.TEXT_DIM))
+	cols.add_child(_standings_value("Игрок", 0, WeTokens.TEXT_DIM, false, true))
+	var club := _standings_value("Клуб", 96, WeTokens.TEXT_DIM)
 	club.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	cols.add_child(club)
-	cols.add_child(_dense_metric(column, 36, WeTokens.TEXT_DIM))
+	cols.add_child(_standings_value(column, 52, WeTokens.ACCENT))
 	return row
 
 
@@ -1323,15 +1813,10 @@ func _stats_data_row(
 	row: Dictionary,
 	place: int,
 	field: String,
-	zebra: bool
+	_zebra: bool
 ) -> PanelContainer:
-	var panel := PanelContainer.new()
-	var bg := Color(1, 1, 1, 0.03) if zebra else Color(0, 0, 0, 0)
-	panel.add_theme_stylebox_override("panel", WeTokens.fill(bg, 0, 4, 1))
-	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 4)
-	_center_row(cols)
-	panel.add_child(cols)
+	var panel := _report_row(false, place == 1)
+	var cols: HBoxContainer = panel.get_meta("columns")
 
 	var player_id := int(row.get("player_id", 0))
 	var player_name := str(row.get("name", "")).strip_edges()
@@ -1341,17 +1826,14 @@ func _stats_data_row(
 		player_name = "Игрок #%d" % player_id
 	var club_id := int(row.get("club_id", 0))
 
-	cols.add_child(_dense_label(str(place), 16, WeTokens.TEXT_MUTED))
+	cols.add_child(_standings_value(str(place), STANDINGS_PLACE_W, WeTokens.ACCENT if place == 1 else WeTokens.TEXT_MUTED, place == 1))
 	var player := _player_link(player_id, player_name)
-	player.add_theme_font_size_override("font_size", 12)
 	player.tooltip_text = player_name
 	cols.add_child(player)
 	cols.add_child(_stats_club_cell(unit, club_id))
-	cols.add_child(_dense_metric(
-		UnitSeasonStatsScript.format_metric(row, field),
-		36,
-		WeTokens.ACCENT
-	))
+	var metric := _points_badge(UnitSeasonStatsScript.format_metric(row, field))
+	metric.custom_minimum_size.x = 52
+	cols.add_child(metric)
 	return panel
 
 
@@ -1380,13 +1862,13 @@ func _player_link(player_id: int, player_name: String) -> Button:
 
 func _stats_club_cell(unit: Dictionary, club_id: int) -> HBoxContainer:
 	var box := HBoxContainer.new()
-	box.custom_minimum_size = Vector2(58, 0)
-	box.add_theme_constant_override("separation", 4)
+	box.custom_minimum_size = Vector2(96, 0)
+	box.add_theme_constant_override("separation", 6)
 	_center_row(box)
-	box.add_child(_club_logo_rect(unit, club_id, 16))
+	box.add_child(_club_logo_rect(unit, club_id, STANDINGS_LOGO))
 	var short_name := GameSession.club_name(unit, club_id, true)
 	var full_name := GameSession.club_name(unit, club_id)
-	var label := _dense_label(short_name, 38, WeTokens.TEXT_MUTED)
+	var label := _standings_value(short_name, 68, WeTokens.TEXT_MUTED)
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	label.tooltip_text = full_name
 	box.add_child(label)
@@ -1402,6 +1884,9 @@ func _open_stats_player(player_id: int) -> void:
 
 
 func _build_calendar_view(unit: Dictionary) -> void:
+	if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
+		_content.add_child(_hint_label("Календарь появится после жеребьёвки перед стартом турнира."))
+		return
 	var by_day := GameSession.matches_by_day(unit)
 	if by_day.is_empty():
 		var type_code := str(unit.get("competition_type", ""))
@@ -1570,6 +2055,15 @@ func _playoff_series_card(
 ) -> PanelContainer:
 	var card := PanelContainer.new()
 	card.set_meta("mirrored", mirrored)
+	card.mouse_filter = Control.MOUSE_FILTER_STOP
+	card.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	card.gui_input.connect(func(event: InputEvent):
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			var selected: Dictionary = card.get_meta("detail_series", {})
+			if not selected.is_empty():
+				_show_series_results(card.get_meta("detail_unit", {}), selected)
+				card.accept_event()
+	)
 	var root := HBoxContainer.new()
 	root.add_theme_constant_override("separation", 8)
 	card.add_child(root)
@@ -1601,7 +2095,43 @@ func _playoff_series_card(
 		root.add_child(box)
 
 	_apply_playoff_card(card, unit, playoff, series)
+	_ignore_series_children(card)
 	return card
+
+
+func _ignore_series_children(node: Control) -> void:
+	for child in node.get_children():
+		if child is Control:
+			child.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			_ignore_series_children(child)
+
+
+func _show_series_results(unit: Dictionary, series: Dictionary) -> void:
+	_stop_simulation()
+	var dialog = load("res://scenes/game/season_history_dialog.tscn").instantiate()
+	add_child(dialog)
+	dialog.z_index = 120
+	dialog.show_series(unit, series, func(id, edge): return _club_logo_rect(unit, id, edge))
+
+
+func _open_history_season(unit: Dictionary, season: int) -> void:
+	_stop_simulation()
+	var result := GameSession.get_tournament_season(int(unit.get("id", 0)), season)
+	var snapshot: Dictionary = result.get("data", {}) if result.get("success", false) else {}
+	if snapshot.is_empty():
+		snapshot = {"id": unit.get("id", 0), "label": unit.get("label", unit.get("name", "Турнир")), "archive_missing": true, "winners": unit.get("winners", []).filter(func(row): return int(row.get("season", 0)) == season)}
+		if not result.get("success", false):
+			snapshot["archive_error"] = str(result.get("error", "Ошибка чтения архива"))
+	var dialog = load("res://scenes/game/season_history_dialog.tscn").instantiate()
+	add_child(dialog)
+	dialog.show_season(snapshot, season,
+		func(u, p, s, mirrored): return _playoff_series_card(u, p, s, mirrored),
+		func(card, u, p, s): _apply_playoff_card(card, u, p, s),
+		func(kind, u, data, offset, limit):
+			if kind == "table":
+				return _standings_card(u, int(data["index"]), str(data["title"]), {})
+			return _stats_board(u, data, offset, limit),
+		func(id, edge): return _club_logo_rect(snapshot, id, edge))
 
 
 func _playoff_team_row_shell(mirrored: bool) -> HBoxContainer:
@@ -1657,6 +2187,10 @@ func _apply_playoff_card(
 	playoff: Dictionary,
 	series: Dictionary
 ) -> void:
+	card.set_meta("detail_series", series)
+	card.set_meta("detail_unit", unit)
+	card.tooltip_text = "Нажмите, чтобы посмотреть матчи" if not series.is_empty() else ""
+	card.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if not series.is_empty() else Control.CURSOR_ARROW
 	var complete := bool(series.get("complete", false))
 	var winner_id: int = int(series.get("winner_id", 0))
 	var current := not series.is_empty() \
@@ -1738,7 +2272,10 @@ func _apply_playoff_team_row(
 
 	var score_text := "—"
 	if club_id > 0:
-		if format == PlayoffRules.FORMAT_TWO_LEGGED:
+		if format == PlayoffRules.FORMAT_SINGLE:
+			if int(series.get("games_played", 0)) > 0:
+				score_text = str(int(series.get("home_goals" if is_home else "away_goals", 0)))
+		elif format == PlayoffRules.FORMAT_TWO_LEGGED:
 			score_text = str(int(series.get("home_goals" if is_home else "away_goals", 0)))
 		else:
 			score_text = str(int(series.get("home_wins" if is_home else "away_wins", 0)))
@@ -1805,85 +2342,62 @@ func _build_preview_view(unit: Dictionary) -> void:
 
 
 func _preview_section(unit: Dictionary, section: Dictionary) -> Control:
-	var block := VBoxContainer.new()
-	block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	block.add_theme_constant_override("separation", 2)
-	block.add_child(_section_title(str(section.get("title", "Превью"))))
 	var note := str(section.get("note", "")).strip_edges()
-	if not note.is_empty():
-		block.add_child(_dense_hint(note))
-
 	var kind := str(section.get("kind", "table"))
-	var panel := _tight_panel()
-	var list := VBoxContainer.new()
-	list.add_theme_constant_override("separation", 0)
-	panel.add_child(list)
-	block.add_child(panel)
+	var list := _report_card(str(section.get("title", "Превью")), note)
+	var panel := list.get_parent() as PanelContainer
 	list.add_child(_preview_header(kind))
 	var rows: Array = section.get("rows", [])
 	if rows.is_empty():
 		list.add_child(_hint_label("Некого оценивать"))
-		return block
+		return panel
 	for i in rows.size():
 		var row: Dictionary = rows[i]
 		list.add_child(_preview_row(unit, row, kind, i % 2 == 1))
-	return block
+	return panel
 
 
 func _preview_header(kind: String) -> PanelContainer:
-	var row := PanelContainer.new()
-	row.add_theme_stylebox_override("panel", WeTokens.fill(WeTokens.INSET, 0, 4, 2))
-	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 4)
-	_center_row(cols)
-	row.add_child(cols)
-	cols.add_child(_dense_label("#", 16, WeTokens.TEXT_DIM))
-	var logo_slot := Control.new()
-	logo_slot.custom_minimum_size = Vector2(16, 0)
-	cols.add_child(logo_slot)
-	cols.add_child(_dense_label("Клуб", 0, WeTokens.TEXT_DIM, true))
+	var row := _report_row(true)
+	var cols: HBoxContainer = row.get_meta("columns")
+	cols.add_child(_standings_value("#", STANDINGS_PLACE_W, WeTokens.TEXT_DIM))
+	cols.add_child(_standings_logo_gap())
+	cols.add_child(_standings_value("Клуб", 0, WeTokens.TEXT_DIM, false, true))
 	if kind == "knockout":
-		var stage_title := _dense_label("Стадия", 72, WeTokens.TEXT_DIM)
+		var stage_title := _standings_value("Стадия", 78, WeTokens.TEXT_DIM)
 		stage_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		cols.add_child(stage_title)
 	if kind == "playoff" or kind == "qualify":
-		cols.add_child(_dense_metric("Выход", 44, WeTokens.TEXT_DIM))
+		cols.add_child(_standings_value("Выход", 52, WeTokens.TEXT_DIM))
 	if kind != "qualify":
-		cols.add_child(_dense_metric("Титул", 44, WeTokens.TEXT_DIM))
+		cols.add_child(_standings_value("Титул", 52, WeTokens.ACCENT))
 	return row
 
 
-func _preview_row(unit: Dictionary, row: Dictionary, kind: String, zebra: bool) -> PanelContainer:
-	var panel := PanelContainer.new()
+func _preview_row(unit: Dictionary, row: Dictionary, kind: String, _zebra: bool) -> PanelContainer:
 	var place := int(row.get("place", 0))
-	var bg := Color(1, 1, 1, 0.03) if zebra else Color(0, 0, 0, 0)
-	if place == 1:
-		bg = Color(WeTokens.ACCENT.r, WeTokens.ACCENT.g, WeTokens.ACCENT.b, 0.1)
-	panel.add_theme_stylebox_override("panel", WeTokens.fill(bg, 0, 4, 1))
-	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 4)
-	_center_row(cols)
-	panel.add_child(cols)
+	var panel := _report_row(false, place == 1)
+	var cols: HBoxContainer = panel.get_meta("columns")
 	var club_id := int(row.get("club_id", 0))
-	cols.add_child(_dense_label(str(place), 16, _history_place_color(place)))
-	cols.add_child(_club_logo_rect(unit, club_id, 16))
+	cols.add_child(_standings_value(str(place), STANDINGS_PLACE_W, _history_place_color(place), place == 1))
+	cols.add_child(_club_logo_rect(unit, club_id, STANDINGS_LOGO))
 	var link := _club_link(unit, club_id)
-	link.add_theme_font_size_override("font_size", 12)
 	var stored := str(row.get("club_name", "")).strip_edges()
 	if not stored.is_empty() and link.text.begins_with("Клуб #"):
 		link.text = stored
 	link.tooltip_text = link.text
 	cols.add_child(link)
 	if kind == "knockout":
-		var stage := _dense_label(str(row.get("stage", "—")), 72, WeTokens.TEXT)
+		var stage := _standings_value(str(row.get("stage", "—")), 78, WeTokens.TEXT)
 		stage.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		cols.add_child(stage)
 	if kind == "playoff" or kind == "qualify":
-		cols.add_child(_dense_metric(_preview_chance_text(float(row.get("qualify_chance", 0.0))), 44, WeTokens.TEXT))
+		cols.add_child(_standings_value(_preview_chance_text(float(row.get("qualify_chance", 0.0))), 52, WeTokens.TEXT))
 	if kind != "qualify":
 		var chance := float(row.get("title_chance", 0.0))
-		var color := WeTokens.ACCENT if place == 1 else WeTokens.TEXT
-		cols.add_child(_dense_metric(_preview_chance_text(chance), 44, color))
+		var metric := _points_badge(_preview_chance_text(chance))
+		metric.custom_minimum_size.x = 52
+		cols.add_child(metric)
 	return panel
 
 
@@ -1896,164 +2410,379 @@ func _preview_chance_text(chance: float) -> String:
 
 
 func _build_history_view(unit: Dictionary) -> void:
-	var winners: Array = []
-	for entry in unit.get("winners", []):
-		if typeof(entry) == TYPE_DICTIONARY:
-			winners.append(entry)
-	if winners.is_empty():
+	var entries := _history_entries(unit.get("winners", []))
+	if entries.is_empty():
 		_content.add_child(_hint_label("История победителей пуста — новый турнир, сезон только начался."))
 		return
-	winners.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+
+	var tabs := WeTabBar.new()
+	tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tabs.set_tabs(PackedStringArray(["Медали", "История сезонов"]))
+	tabs.select(_history_tab, false)
+	tabs.tab_selected.connect(func(index: int) -> void:
+		if _history_tab == index:
+			return
+		_history_tab = index
+		_rebuild_content()
+	)
+	_content.add_child(tabs)
+
+	var row := _history_split()
+	if _history_tab == 0:
+		row.add_child(_history_medal_card(unit, "Плей-офф", _history_medal_rows(entries, "playoff"), true))
+		if not NationalTeams.is_unit(unit):
+			row.add_child(_history_medal_card(unit, "Регулярный сезон", _history_medal_rows(entries, "regular"), false))
+	else:
+		var playoff_card := _history_season_card(unit, "Плей-офф", entries, "playoff", 4, true)
+		playoff_card.size_flags_stretch_ratio = 4.0
+		var regular_card := _history_season_card(unit, "Регулярный сезон", entries, "regular", 3, false)
+		regular_card.size_flags_stretch_ratio = 3.0
+		row.add_child(playoff_card)
+		if not NationalTeams.is_unit(unit):
+			row.add_child(regular_card)
+		else:
+			regular_card.free()
+	_content.add_child(row)
+
+
+func _history_entries(winners: Array) -> Array:
+	var entries: Array = []
+	for entry in winners:
+		if typeof(entry) == TYPE_DICTIONARY:
+			entries.append(entry)
+	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return int(a.get("season", 0)) > int(b.get("season", 0))
 	)
-
-	var table := _surface_panel()
-	var list := VBoxContainer.new()
-	list.add_theme_constant_override("separation", 0)
-	table.add_child(list)
-	list.add_child(_history_header())
-	for i in winners.size():
-		list.add_child(_history_season_row(unit, winners[i], i % 2 == 1))
-	_content.add_child(table)
+	return entries
 
 
-func _history_header() -> PanelContainer:
-	var row := PanelContainer.new()
-	row.add_theme_stylebox_override("panel", WeTokens.fill(WeTokens.INSET, 0, 12, 10))
-	var cols := _history_line()
-	row.add_child(cols)
-	cols.add_child(_history_title("Сезон", false))
-	cols.add_child(_history_title("Плей-офф", true))
-	var regular := _history_title("Регулярный сезон", true)
-	regular.size_flags_stretch_ratio = 3.0
-	cols.add_child(regular)
-	return row
-
-
-func _history_title(text: String, expand: bool) -> Label:
-	var label := Label.new()
-	label.text = text
-	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	label.add_theme_color_override("font_color", WeTokens.TEXT_MUTED)
-	label.add_theme_font_size_override("font_size", 11)
-	var font := WeTokens.font_semibold()
-	if font != null:
-		label.add_theme_font_override("font", font)
-	if expand:
-		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		label.size_flags_stretch_ratio = 4.0
-	else:
-		label.custom_minimum_size = Vector2(96, 0)
-	return label
-
-
-func _history_season_row(unit: Dictionary, entry: Dictionary, zebra: bool) -> PanelContainer:
-	var panel := PanelContainer.new()
-	var bg := Color(1, 1, 1, 0.035) if zebra else Color(0, 0, 0, 0)
-	panel.add_theme_stylebox_override("panel", WeTokens.fill(bg, 0, 8, 8))
-	var cols := _history_line()
-	panel.add_child(cols)
-
-	var season := Label.new()
-	season.text = "Сезон %d" % int(entry.get("season", 0))
-	season.custom_minimum_size = Vector2(96, 36)
-	season.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	season.add_theme_color_override("font_color", WeTokens.TEXT)
-	season.add_theme_font_size_override("font_size", 14)
-	var font := WeTokens.font_semibold()
-	if font != null:
-		season.add_theme_font_override("font", font)
-	cols.add_child(season)
-
-	var playoff_rows: Array = entry.get("playoff", []) if typeof(entry.get("playoff")) == TYPE_ARRAY else []
-	if playoff_rows.is_empty() and not entry.has("playoff"):
+func _history_places(entry: Dictionary, key: String) -> Array:
+	var rows: Array = entry.get(key, []) if typeof(entry.get(key)) == TYPE_ARRAY else []
+	if key == "playoff" and rows.is_empty() and not entry.has("playoff"):
 		var champion_id := int(entry.get("club_id", 0))
 		if champion_id > 0:
-			playoff_rows = [{
+			rows = [{
 				"place": 1,
 				"club_id": champion_id,
 				"club_name": str(entry.get("club_name", "")),
 			}]
-	var regular_rows: Array = entry.get("regular", []) if typeof(entry.get("regular")) == TYPE_ARRAY else []
-	cols.add_child(_history_place_group(unit, playoff_rows, 4))
-	cols.add_child(_history_place_group(unit, regular_rows, 3))
+	return rows
+
+
+func _history_medal_rows(entries: Array, key: String) -> Array:
+	var tally: Dictionary = {}
+	for entry in entries:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		for row in _history_places(entry, key):
+			if typeof(row) != TYPE_DICTIONARY:
+				continue
+			var place := int(row.get("place", 0))
+			if place < 1 or place > 3:
+				continue
+			var club_id := int(row.get("club_id", 0))
+			if club_id < 1:
+				continue
+			if not tally.has(club_id):
+				tally[club_id] = {
+					"club_id": club_id,
+					"club_name": "",
+					"gold": 0,
+					"silver": 0,
+					"bronze": 0,
+				}
+			var bucket: Dictionary = tally[club_id]
+			var stored := str(row.get("club_name", "")).strip_edges()
+			if str(bucket.get("club_name", "")).is_empty() and not stored.is_empty():
+				bucket["club_name"] = stored
+			match place:
+				1:
+					bucket["gold"] = int(bucket.get("gold", 0)) + 1
+				2:
+					bucket["silver"] = int(bucket.get("silver", 0)) + 1
+				3:
+					bucket["bronze"] = int(bucket.get("bronze", 0)) + 1
+			tally[club_id] = bucket
+	var rows: Array = tally.values()
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var gold := int(b.get("gold", 0)) - int(a.get("gold", 0))
+		if gold != 0:
+			return gold < 0
+		var silver := int(b.get("silver", 0)) - int(a.get("silver", 0))
+		if silver != 0:
+			return silver < 0
+		var bronze := int(b.get("bronze", 0)) - int(a.get("bronze", 0))
+		if bronze != 0:
+			return bronze < 0
+		return str(a.get("club_name", "")).nocasecmp_to(str(b.get("club_name", ""))) < 0
+	)
+	return rows
+
+
+func _history_split() -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("separation", 14)
+	return row
+
+
+func _history_card(title: String, playoff: bool) -> VBoxContainer:
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.clip_contents = true
+	panel.add_theme_stylebox_override(
+		"panel",
+		WeTokens.panel(WeTokens.SURFACE, WeTokens.BORDER, 12, 1)
+	)
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 0)
+	panel.add_child(root)
+	root.add_child(_history_band(title, playoff))
+	return root
+
+
+func _history_band(title: String, playoff: bool) -> PanelContainer:
+	var tint := Color(0.95, 0.74, 0.34, 0.16) if playoff else Color(WeTokens.ACCENT.r, WeTokens.ACCENT.g, WeTokens.ACCENT.b, 0.14)
+	var band := PanelContainer.new()
+	band.add_theme_stylebox_override("panel", WeTokens.fill(tint, 0, 10, 6))
+	var label := Label.new()
+	label.text = title
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.add_theme_color_override("font_color", WeTokens.TEXT)
+	label.add_theme_font_size_override("font_size", 13)
+	_apply_semibold(label)
+	band.add_child(label)
+	return band
+
+
+func _history_medal_card(unit: Dictionary, title: String, rows: Array, playoff: bool) -> PanelContainer:
+	var root := _history_card(title, playoff)
+	var panel := root.get_parent() as PanelContainer
+	if rows.is_empty():
+		root.add_child(_history_empty("Пока нет призёров"))
+		return panel
+	root.add_child(_history_medal_header())
+	for i in rows.size():
+		root.add_child(_history_medal_row(unit, rows[i], i + 1, i == rows.size() - 1))
 	return panel
 
 
-func _history_line() -> HBoxContainer:
-	var line := HBoxContainer.new()
-	line.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	line.add_theme_constant_override("separation", 10)
-	_center_row(line)
+func _history_medal_header() -> PanelContainer:
+	var row := _history_line_panel(Color(0, 0, 0, 0.14), true)
+	var cols := _history_medal_line()
+	row.add_child(cols)
+	cols.add_child(_history_stat("#", 22, WeTokens.TEXT_DIM))
+	cols.add_child(_history_logo_gap(16))
+	cols.add_child(_history_stat("Команда", 0, WeTokens.TEXT_DIM, false, true, HORIZONTAL_ALIGNMENT_LEFT))
+	cols.add_child(_history_medal_heading("З", 1, "Золото"))
+	cols.add_child(_history_medal_heading("С", 2, "Серебро"))
+	cols.add_child(_history_medal_heading("Б", 3, "Бронза"))
+	return row
+
+
+func _history_medal_heading(text: String, place: int, hint: String) -> Label:
+	var label := _history_stat(text, 28, _history_place_color(place), true)
+	label.mouse_filter = Control.MOUSE_FILTER_STOP
+	label.tooltip_text = hint
+	return label
+
+
+func _history_medal_row(unit: Dictionary, row: Dictionary, rank: int, last: bool) -> PanelContainer:
+	var line := _history_line_panel(Color(0, 0, 0, 0), not last)
+	var cols := _history_medal_line()
+	line.add_child(cols)
+	cols.add_child(_history_stat(str(rank), 22, WeTokens.TEXT_MUTED, true))
+	var club_id := int(row.get("club_id", 0))
+	cols.add_child(_club_logo_rect(unit, club_id, 16))
+	cols.add_child(_history_name_link(unit, row))
+	cols.add_child(_history_medal_count(int(row.get("gold", 0)), 1))
+	cols.add_child(_history_medal_count(int(row.get("silver", 0)), 2))
+	cols.add_child(_history_medal_count(int(row.get("bronze", 0)), 3))
 	return line
 
 
-func _history_place_group(unit: Dictionary, rows: Array, slots: int) -> HBoxContainer:
-	var group := HBoxContainer.new()
-	group.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	group.size_flags_stretch_ratio = float(slots)
-	group.add_theme_constant_override("separation", 6)
-	_center_row(group)
-	if rows.is_empty():
-		var empty := _history_club_slot(unit, {}, 0)
-		empty.size_flags_stretch_ratio = float(slots)
-		group.add_child(empty)
-		return group
-	var by_place := {}
-	for row in rows:
-		if typeof(row) != TYPE_DICTIONARY:
-			continue
-		by_place[int(row.get("place", 0))] = row
+func _history_medal_count(count: int, place: int) -> Label:
+	var color := WeTokens.TEXT_DIM if count == 0 else _history_place_color(place)
+	return _history_stat(str(count), 28, color, count > 0)
+
+
+func _history_medal_line() -> HBoxContainer:
+	var cols := HBoxContainer.new()
+	cols.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cols.alignment = BoxContainer.ALIGNMENT_CENTER
+	cols.add_theme_constant_override("separation", 6)
+	return cols
+
+
+func _history_season_card(
+	unit: Dictionary,
+	title: String,
+	entries: Array,
+	key: String,
+	slots: int,
+	playoff: bool
+) -> PanelContainer:
+	var root := _history_card(title, playoff)
+	var panel := root.get_parent() as PanelContainer
+	root.add_child(_history_season_header(slots))
+	for i in entries.size():
+		var entry: Dictionary = entries[i]
+		root.add_child(_history_season_line(
+			unit,
+			entry,
+			key,
+			slots,
+			i == entries.size() - 1
+		))
+	return panel
+
+
+func _history_season_header(slots: int) -> PanelContainer:
+	var row := _history_line_panel(Color(0, 0, 0, 0.14), true)
+	var cols := _history_season_line_box()
+	row.add_child(cols)
+	cols.add_child(_history_stat("Сезон", 76, WeTokens.TEXT_DIM, false, false, HORIZONTAL_ALIGNMENT_LEFT))
 	for place in range(1, slots + 1):
-		group.add_child(_history_club_slot(unit, by_place.get(place, {}), place))
-	return group
+		var mark := _history_stat(str(place), 0, _history_place_color(place), true, true, HORIZONTAL_ALIGNMENT_LEFT)
+		cols.add_child(mark)
+	return row
 
 
-func _history_club_slot(unit: Dictionary, row: Dictionary, place: int) -> PanelContainer:
-	var chip := PanelContainer.new()
-	chip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	chip.size_flags_stretch_ratio = 1.0
-	var bg := Color(1, 1, 1, 0.045)
-	if place == 1 and not row.is_empty():
-		bg = Color(WeTokens.ACCENT.r, WeTokens.ACCENT.g, WeTokens.ACCENT.b, 0.14)
-	chip.add_theme_stylebox_override("panel", WeTokens.fill(bg, 8, 8, 6))
+func _history_season_line(
+	unit: Dictionary,
+	entry: Dictionary,
+	key: String,
+	slots: int,
+	last: bool
+) -> PanelContainer:
+	var row := _history_line_panel(Color(0, 0, 0, 0), not last)
+	var cols := _history_season_line_box()
+	row.add_child(cols)
+	var season := _history_stat(
+		"Сезон %d" % int(entry.get("season", 0)),
+		76,
+		WeTokens.TEXT,
+		true,
+		false,
+		HORIZONTAL_ALIGNMENT_LEFT
+	)
+	season.add_theme_font_size_override("font_size", 12)
+	season.mouse_filter = Control.MOUSE_FILTER_STOP
+	season.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	season.focus_mode = Control.FOCUS_ALL
+	season.tooltip_text = "Открыть таблицы, статистику и плей-офф сезона"
+	season.gui_input.connect(func(event: InputEvent):
+		var clicked: bool = event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT
+		if clicked or event.is_action_pressed("ui_accept"):
+			_open_history_season(unit, int(entry.get("season", 0)))
+			season.accept_event()
+	)
+	cols.add_child(season)
+
+	var places := _history_places(entry, key)
+	if places.is_empty():
+		var empty := _history_stat("—", 0, WeTokens.TEXT_DIM, false, true, HORIZONTAL_ALIGNMENT_LEFT)
+		empty.size_flags_stretch_ratio = float(slots)
+		cols.add_child(empty)
+		return row
+
+	var by_place := {}
+	for place_row in places:
+		if typeof(place_row) != TYPE_DICTIONARY:
+			continue
+		by_place[int(place_row.get("place", 0))] = place_row
+	for place in range(1, slots + 1):
+		cols.add_child(_history_place_cell(unit, by_place.get(place, {})))
+	return row
+
+
+func _history_season_line_box() -> HBoxContainer:
+	var cols := HBoxContainer.new()
+	cols.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cols.alignment = BoxContainer.ALIGNMENT_CENTER
+	cols.add_theme_constant_override("separation", 8)
+	return cols
+
+
+func _history_place_cell(unit: Dictionary, row: Dictionary) -> HBoxContainer:
+	var cell := HBoxContainer.new()
+	cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cell.alignment = BoxContainer.ALIGNMENT_CENTER
+	cell.add_theme_constant_override("separation", 4)
 	if row.is_empty():
-		var dash := Label.new()
-		dash.text = "—"
-		dash.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		dash.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		dash.custom_minimum_size = Vector2(0, 28)
-		dash.add_theme_color_override("font_color", WeTokens.TEXT_DIM)
-		dash.add_theme_font_size_override("font_size", 13)
-		chip.add_child(dash)
-		return chip
+		cell.add_child(_history_stat("—", 0, WeTokens.TEXT_DIM, false, true, HORIZONTAL_ALIGNMENT_LEFT))
+		return cell
+	cell.add_child(_club_logo_rect(unit, int(row.get("club_id", 0)), 16))
+	cell.add_child(_history_name_link(unit, row))
+	return cell
 
-	var box := HBoxContainer.new()
-	box.add_theme_constant_override("separation", 6)
-	_center_row(box)
-	chip.add_child(box)
 
-	var mark := Label.new()
-	mark.text = str(place)
-	mark.custom_minimum_size = Vector2(14, 22)
-	mark.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	mark.add_theme_color_override("font_color", _history_place_color(place))
-	mark.add_theme_font_size_override("font_size", 13)
-	var font := WeTokens.font_semibold()
-	if font != null:
-		mark.add_theme_font_override("font", font)
-	box.add_child(mark)
-
+func _history_name_link(unit: Dictionary, row: Dictionary) -> Button:
 	var club_id := int(row.get("club_id", 0))
-	box.add_child(_club_logo_rect(unit, club_id, 22))
 	var link := _club_link(unit, club_id)
-	link.add_theme_font_size_override("font_size", 13)
+	link.add_theme_font_size_override("font_size", 12)
+	link.clip_text = true
+	link.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	var stored_name := str(row.get("club_name", "")).strip_edges()
 	if not stored_name.is_empty() and link.text.begins_with("Клуб #"):
 		link.text = stored_name
 	link.tooltip_text = link.text
-	box.add_child(link)
-	return chip
+	return link
+
+
+func _history_line_panel(bg: Color, draw_line: bool) -> PanelContainer:
+	var row := PanelContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var box := WeTokens.fill(bg, 0, 8, 3)
+	if draw_line:
+		box.border_width_bottom = 1
+		box.border_color = Color(1, 1, 1, 0.06)
+		box.content_margin_bottom = 4
+	row.add_theme_stylebox_override("panel", box)
+	return row
+
+
+func _history_empty(text: String) -> MarginContainer:
+	var wrap := MarginContainer.new()
+	wrap.add_theme_constant_override("margin_left", 10)
+	wrap.add_theme_constant_override("margin_top", 8)
+	wrap.add_theme_constant_override("margin_bottom", 8)
+	wrap.add_child(_hint_label(text))
+	return wrap
+
+
+func _history_logo_gap(size: int) -> Control:
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(size, size)
+	gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return gap
+
+
+func _history_stat(
+	text: String,
+	width: int,
+	color: Color,
+	strong: bool = false,
+	expand: bool = false,
+	align: HorizontalAlignment = HORIZONTAL_ALIGNMENT_CENTER
+) -> Label:
+	var label := Label.new()
+	label.text = text
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.add_theme_color_override("font_color", color)
+	label.add_theme_font_size_override("font_size", 12)
+	label.clip_text = true
+	label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.horizontal_alignment = align
+	label.custom_minimum_size.y = 18
+	if strong:
+		_apply_semibold(label)
+	if expand:
+		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	elif width > 0:
+		label.custom_minimum_size.x = width
+	return label
 
 
 func _history_place_color(place: int) -> Color:
@@ -2168,3 +2897,27 @@ func _tight_panel() -> PanelContainer:
 
 func _center_row(box: HBoxContainer) -> void:
 	box.alignment = BoxContainer.ALIGNMENT_CENTER
+
+
+func _on_market_coach_requested(coach_id: int) -> void:
+	_return_to_directory = "coaches"
+	_return_from_coach_card = false
+	_show_coach_card_view()
+	_coach_card.open_for(coach_id)
+
+
+func _on_national_player_requested(player_id: int) -> void:
+	_return_to_national_profile = _national_team_card.get_country_id()
+	_show_player_card_view()
+	_player_card.open_for(player_id)
+
+func _on_national_coach_requested(coach_id: int) -> void:
+	_return_to_national_profile = _national_team_card.get_country_id()
+	_show_coach_card_view()
+	_coach_card.open_for(coach_id)
+
+func _restore_national_profile() -> void:
+	var country := _return_to_national_profile
+	_return_to_national_profile = 0
+	_show_national_team_card_view()
+	_national_team_card.open_for(country)

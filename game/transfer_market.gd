@@ -1,7 +1,7 @@
 class_name TransferMarket
 extends RefCounted
 ## Market window: surplus listings, one upgrade bid per club, hole-fill buys,
-## then free-agent fill to the day cap. Last day dumps unsold listings.
+## then free-agent fill to the day cap. Unexpired unsold contracts are retained.
 
 
 const CoachTypesScript := preload("res://game/coach_types.gd")
@@ -9,6 +9,7 @@ const PlayerTypesScript := preload("res://game/player_types.gd")
 const ClubFinanceScript := preload("res://game/club_finance.gd")
 const PlayerMarketScript := preload("res://game/player_market.gd")
 const YouthGraduationScript := preload("res://game/youth_graduation.gd")
+const Offer := preload("res://game/player_offer.gd")
 
 const SQUAD_SIZE := PlayerTypesScript.SQUAD_SIZE
 const POS_FLEX := "FLEX"
@@ -19,56 +20,37 @@ const MIN_JOIN_YEARS := 2
 const UPGRADE_CA_GAP := 4
 const WEAK_LINK_GAP := 6
 const UPGRADE_FEE_FACTOR := 1.25
+const TARGET_PAID_SHARE := 0.325
+const STARTER_COVER_CA_GAP := 7
+
+
+## Target genuine completed arrivals, not bids or the duplicate seller log.
+## Vacancies anticipate the free signings still due in this market window.
+static func paid_allowance(session: Node, clubs: Dictionary) -> int:
+	var arrivals := 0
+	var paid := 0
+	for i in range(session.transfer_log.size() - 1, -1, -1):
+		var entry: Dictionary = session.transfer_log[i]
+		if int(entry.get("season", 0)) < int(session.season_number):
+			break
+		if int(entry.get("season", 0)) == int(session.season_number) and str(entry.get("direction", "")) == "in":
+			arrivals += 1
+			if int(entry.get("fee", 0)) > 0:
+				paid += 1
+	var vacancies := 0
+	for id in clubs:
+		vacancies += maxi(0, SQUAD_SIZE - session.get_club_players(int(id)).size())
+	if arrivals + vacancies == 0:
+		return 1 # An otherwise settled window may still start with a real upgrade.
+	return maxi(0, int(ceil(float(arrivals + vacancies) * TARGET_PAID_SHARE)) - paid)
 
 
 static func run_day(session: Node, rng: RandomNumberGenerator) -> Dictionary:
 	if session == null or rng == null:
-		return {"signed": 0, "bought": 0, "listed": 0, "unsold": 0, "upgrades": 0, "bids": 0}
-	if not session.is_market_day(session.season_day):
-		return {"signed": 0, "bought": 0, "listed": 0, "unsold": 0, "upgrades": 0, "bids": 0}
-
-	var clubs: Dictionary = session._collect_session_clubs()
-	if clubs.is_empty():
-		return {"signed": 0, "bought": 0, "listed": 0, "unsold": 0, "upgrades": 0, "bids": 0}
-
-	var listed := 0
-	var profile := {}
-	var phase_start := Time.get_ticks_usec()
-	if session.season_day == session.MARKET_OPEN_DAY:
-		listed = _list_surplus(session, clubs)
-	profile["list_surplus_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
-
-	phase_start = Time.get_ticks_usec()
-	var upgrades: Dictionary = _run_upgrade_wave(session, clubs, rng)
-	profile["upgrade_wave_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
-	phase_start = Time.get_ticks_usec()
-	var bought := int(upgrades.get("bought", 0)) + _run_club_to_club_wave(
-		session, clubs, rng, upgrades.get("protected", {})
-	)
-	profile["club_sales_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
-
-	phase_start = Time.get_ticks_usec()
-	var unsold := 0
-	if session.season_day == session.MARKET_LAST_DAY:
-		unsold = _release_unsold_listed(session, clubs)
-	profile["release_unsold_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
-
-	phase_start = Time.get_ticks_usec()
-	var order: Array = _club_pick_order(session, clubs, rng)
-	var signed: int = _fill_from_free_agents(session, clubs, order, rng, false)
-	if session.season_day == session.MARKET_LAST_DAY:
-		signed += _fill_from_free_agents(session, clubs, order, rng, true)
-	profile["free_agent_fill_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
-
-	return {
-		"signed": signed,
-		"bought": bought,
-		"listed": listed,
-		"unsold": unsold,
-		"upgrades": int(upgrades.get("bought", 0)),
-		"bids": int(upgrades.get("bids", 0)),
-		"profile": profile,
-	}
+		return {"signed":0,"bought":0,"listed":0,"unsold":0,"upgrades":0,"bids":0}
+	var job: RefCounted=load("res://game/transfer_market_job.gd").new(load("res://game/transfer_market.gd"),session,rng)
+	while not job.step(): pass
+	return job.result
 
 
 static func is_transfer_locked(player: Dictionary, season_number: int) -> bool:
@@ -93,7 +75,7 @@ static func is_buyable(player: Dictionary, season_number: int) -> bool:
 
 
 static func _day_target(day: int, _current_size: int = 0) -> int:
-	# Ramp 5 → 10 → 15 → 20 → 25 across a 5-day window ending at -1.
+	# Ramp to the 20-player squad cap across a 5-day window ending at -1.
 	if day >= -1:
 		return SQUAD_SIZE
 	var open := -5
@@ -105,29 +87,15 @@ static func _day_target(day: int, _current_size: int = 0) -> int:
 	return int(ceili(float(SQUAD_SIZE) * float(index) / float(total)))
 
 
-static func _club_pick_order(session: Node, clubs: Dictionary, rng: RandomNumberGenerator) -> Array:
-	var rows: Array = []
-	for club_id in clubs.keys():
-		var id := int(club_id)
-		var club: Dictionary = clubs.get(id, {})
-		var coach: Dictionary = session.get_club_coach(id)
-		rows.append({
-			"id": id,
-			"skill": CoachTypesScript.transfers_of(coach),
-			"rep": int(club.get("reputation", 500)),
-			"noise": rng.randf(),
-		})
-	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		if int(a["skill"]) != int(b["skill"]):
-			return int(a["skill"]) > int(b["skill"])
-		if int(a["rep"]) != int(b["rep"]):
-			return int(a["rep"]) > int(b["rep"])
-		return float(a["noise"]) < float(b["noise"])
-	)
-	var order: Array = []
-	for row in rows:
-		order.append(int(row["id"]))
-	return order
+static func _club_pick_order(_session: Node,clubs: Dictionary,rng: RandomNumberGenerator) -> Array:
+	# Traversal order grants no reputation privilege. Actual destinations are
+	# settled from simultaneous competing offers in the market job.
+	var ids: Array=clubs.keys()
+	ids.sort()
+	for i in range(ids.size()-1,0,-1):
+		var j := rng.randi_range(0,i)
+		var swap: Variant=ids[i];ids[i]=ids[j];ids[j]=swap
+	return ids
 
 
 static func _fill_from_free_agents(
@@ -141,7 +109,7 @@ static func _fill_from_free_agents(
 	# Stable original indices preserve candidate order and RNG draws. Signings
 	# mark entries consumed; compact once after the wave instead of shifting
 	# the entire free-agent array for every contract.
-	var agent_index := _build_agent_index(session.free_agents)
+	var agent_index := _build_agent_index(session.free_agents, Offer.world_top_reputation(clubs))
 	var progressed := true
 	while progressed:
 		progressed = false
@@ -161,17 +129,24 @@ static func _fill_from_free_agents(
 	return signed
 
 
-static func _build_agent_index(agents: Array) -> Dictionary:
+static func _build_agent_index(agents: Array, world_top_reputation: int = 0) -> Dictionary:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return native.agent_index(agents,world_top_reputation)
 	var positions := PackedStringArray()
 	var raw_positions := PackedStringArray()
 	var nations := PackedInt64Array()
 	var reputations := PackedFloat64Array()
 	var bases := PackedFloat64Array()
+	var minimum_reputations := PackedFloat64Array()
+	var minimum_qualities := PackedFloat64Array()
 	positions.resize(agents.size())
 	raw_positions.resize(agents.size())
 	nations.resize(agents.size())
 	reputations.resize(agents.size())
 	bases.resize(agents.size())
+	minimum_reputations.resize(agents.size())
+	minimum_qualities.resize(agents.size())
 	var groups := {}
 	var indices: Array = []
 	for i in agents.size():
@@ -179,6 +154,9 @@ static func _build_agent_index(agents: Array) -> Dictionary:
 		if typeof(player) != TYPE_DICTIONARY:
 			continue
 		var position := PlayerTypesScript.normalize_position(str(player.get("position", "")))
+		var reservations := Offer.profile(player, world_top_reputation)
+		minimum_reputations[i] = float(reservations["minimum_club_reputation"])
+		minimum_qualities[i] = float(reservations["minimum_squad_ability"])
 		positions[i] = position
 		raw_positions[i] = str(player.get("position", ""))
 		nations[i] = int(player.get("nationality_country_id", 0))
@@ -190,8 +168,9 @@ static func _build_agent_index(agents: Array) -> Dictionary:
 			groups[position] = []
 		groups[position].append(i)
 		indices.append(i)
-	return {"all": indices, "positions": groups, "consumed": {}, "position": positions,
-		"raw_position": raw_positions, "nation": nations, "rep": reputations, "base": bases}
+	return {"world_top_reputation": world_top_reputation, "all": indices, "positions": groups, "consumed": {}, "position": positions,
+		"raw_position": raw_positions, "nation": nations, "rep": reputations, "base": bases,
+		"minimum_reputation": minimum_reputations, "minimum_quality": minimum_qualities}
 
 
 static func _compact_agents(session: Node, agent_index: Dictionary) -> void:
@@ -216,13 +195,41 @@ static func _sign_one(
 	var needed := next_needed_position(squad)
 	if needed.is_empty():
 		return false
-	# Prefer the missing position, then any legal slot. A set foreign cap
-	# stays in force on the last day too.
-	if _try_sign(session, rng, club_id, club, squad, needed, false, false, agent_index):
-		return true
-	if needed != POS_FLEX and _try_sign(session, rng, club_id, club, squad, POS_FLEX, relaxed, false, agent_index):
-		return true
-	return false
+	# Recruit the best available player for any mandatory hole. Filling keepers
+	# first used every foreign slot before a club even considered its attack.
+	return _try_sign(session, rng, club_id, club, squad, POS_FLEX, relaxed, false, agent_index)
+
+
+## The academy and reserve are existing registered club players. If recruitment
+## leaves a hole, promote real cover instead of entering a season undermanned.
+static func _promote_internal_cover(session: Node, club_id: int) -> int:
+	var squad: Array = session.get_club_players(club_id)
+	var promoted := 0
+	var club: Dictionary = session.get_club_identity(club_id)
+	var cap := foreign_limit_for_club(session,club_id)
+	var pools: Array = [session.get_club_reserve_players(club_id), session.get_club_youth_players(club_id)]
+	for pool in pools:
+		while squad.size() < SQUAD_SIZE:
+			var missing := PlayerTypesScript.missing_required_position(squad)
+			var counts := PlayerTypesScript.count_squad_positions(squad)
+			var best: Dictionary = {}
+			for player in pool:
+				var position := PlayerTypesScript.normalize_position(str(player.get("position", "")))
+				if not PlayerTypesScript.can_add_squad_position(squad,position) or (not missing.is_empty() and int(counts.get(position,0))>=PlayerTypesScript.squad_slot_min(position)):
+					continue
+				if cap>=0 and is_foreigner(player,club) and foreign_count(squad,club)>=cap:
+					continue
+				if best.is_empty() or PlayerMarketScript.ability_of(player)>PlayerMarketScript.ability_of(best):
+					best = player
+			if best.is_empty():
+				break
+			pool.erase(best)
+			YouthGraduationScript.prepare_first_team(best)
+			best["contract_years"] = maxi(2,int(best.get("contract_years",0)))
+			PlayerMarketScript.sign_wage(best,club,false)
+			squad.append(best)
+			promoted += 1
+	return promoted
 
 
 static func _try_sign(
@@ -234,7 +241,8 @@ static func _try_sign(
 	needed: String,
 	relaxed: bool,
 	ignore_foreign: bool,
-	agent_index: Dictionary = {}
+	agent_index: Dictionary = {},
+	proposal: Dictionary = {}
 ) -> bool:
 	if needed.is_empty():
 		return false
@@ -243,17 +251,33 @@ static func _try_sign(
 	var best_index := -1
 	var best_score := -99999.0
 	var agents: Array = session.free_agents
+	var native_reserves: Dictionary = agent_index.get("native_reserves", {})
+	if not agent_index.has("native_reserves"):
+		native_reserves = _build_native_reserves(session)
+		if not agent_index.is_empty():
+			agent_index["native_reserves"] = native_reserves
 	# The squad does not change during this candidate scan.
 	var legal_positions := {}
 	for position in PlayerTypesScript.POSITIONS:
 		legal_positions[position] = _position_ok(position, needed, relaxed, squad)
 	var foreign_cap_reached := not ignore_foreign and limit >= 0 and foreign_count(squad, club) >= limit
 	var skill := float(CoachTypesScript.transfers_of(coach))
-	var club_rep := float(int(club.get("reputation", 500)))
+	var club_rep := Offer.Attraction.value(club)
 	var reach := club_rep + (skill - 10.0) * 28.0
 	var noise_span := lerpf(6.0, 1.5, skill / 20.0)
 	var club_nation := int(club.get("country_id", 0))
 	var indexed := not agent_index.is_empty()
+	var offer_context := _offer_context(squad)
+	# The first few keepers/defenders do not describe the quality of a club
+	# assembling its very first team. Prestige and wage demands still apply.
+	if int(session.season_number) == 1 and int(session.season_day) < 1 and squad.size() < SQUAD_SIZE:
+		offer_context["squad_ability"] = -1.0
+	offer_context["world_top_reputation"] = int(agent_index.get("world_top_reputation", 0))
+	offer_context["free_agent"] = true
+	var talks := float(CoachTypesScript.negotiations_of(coach) - 10) * 2.0
+	var squad_quality := float(offer_context["squad_ability"])
+	var minimum_reputations: PackedFloat64Array = agent_index.get("minimum_reputation", PackedFloat64Array())
+	var minimum_qualities: PackedFloat64Array = agent_index.get("minimum_quality", PackedFloat64Array())
 	var positions: PackedStringArray = agent_index.get("position", PackedStringArray())
 	var raw_positions: PackedStringArray = agent_index.get("raw_position", PackedStringArray())
 	var nations: PackedInt64Array = agent_index.get("nation", PackedInt64Array())
@@ -261,42 +285,197 @@ static func _try_sign(
 	var bases: PackedFloat64Array = agent_index.get("base", PackedFloat64Array())
 	var indices: Array = range(agents.size()) if agent_index.is_empty() else \
 		(agent_index["all"] if needed == POS_FLEX or relaxed else agent_index["positions"].get(needed, []))
-	for i in indices:
-		if not agent_index.is_empty() and agent_index["consumed"].has(i):
-			continue
-		var score: float
-		if indexed:
-			if not bool(legal_positions.get(positions[i], false)):
+	var reservation_cache := {}
+	var native: Variant = NativeSimulation.core(false)
+	if indexed and native != null:
+		best_index = int(native.choose_agent(agents, agent_index, {
+			"club": club, "club_id": club_id, "context": offer_context,
+			"legal": legal_positions, "reserves": native_reserves, "indices": indices,
+			"skill": int(skill), "negotiations": CoachTypesScript.negotiations_of(coach),
+			"foreign_cap": foreign_cap_reached, "needed": needed,
+		}, rng))
+	else:
+		for i in indices:
+			if not agent_index.is_empty() and agent_index["consumed"].has(i):
 				continue
-			if foreign_cap_reached and nations[i] > 0 and club_nation > 0 and nations[i] != club_nation:
+			if typeof(agents[i]) != TYPE_DICTIONARY:
 				continue
-			var player_rep := reputations[i]
-			var overreach := maxf(0.0, player_rep - reach)
-			var fit := 1.0 - clampf(absf(player_rep - club_rep) / 1000.0, 0.0, 1.0)
-			var pos_bonus := 2.0 if needed == POS_FLEX else (10.0 if raw_positions[i] == needed else 0.0)
-			# Same double-precision operations and RNG draws as _score_player.
-			score = bases[i] + fit * 30.0 + skill * 0.8 - overreach * (0.12 - skill * 0.003) \
-				+ pos_bonus + rng.randf_range(-noise_span, noise_span)
-		else:
-			var player: Variant = agents[i]
-			if typeof(player) != TYPE_DICTIONARY:
+			var candidate: Dictionary = agents[i]
+			var candidate_position := str(positions[i]) if indexed else PlayerTypesScript.normalize_position(str(candidate.get("position", "")))
+			if not bool(legal_positions.get(candidate_position, false)):
 				continue
-			var position := PlayerTypesScript.normalize_position(str(player.get("position", "")))
-			if not bool(legal_positions.get(position, false)) or (foreign_cap_reached and is_foreigner(player, club)):
+			var candidate_nation := int(nations[i]) if indexed else int(candidate.get("nationality_country_id", 0))
+			if foreign_cap_reached and candidate_nation > 0 and club_nation > 0 and candidate_nation != club_nation:
 				continue
-			score = _score_player(club, coach, player, needed, rng)
-		if score > best_score:
-			best_score = score
-			best_index = i
+			var reservation_key := "%s:%s" % [candidate.get("nationality_country_id", 0), candidate.get("position", "")]
+			if not reservation_cache.has(reservation_key):
+				reservation_cache[reservation_key] = _native_reserved(candidate, club_nation, native_reserves, club_id)
+			if bool(reservation_cache[reservation_key]):
+				continue
+			var score: float
+			if indexed:
+				# Same reservations as PlayerOffer, computed once for the pool.
+				if club_rep + talks < minimum_reputations[i] or (squad_quality >= 0.0 and squad_quality < minimum_qualities[i]):
+					continue
+				var player_rep := reputations[i]
+				var overreach := maxf(0.0, player_rep - reach)
+				var fit := 1.0 - clampf(absf(player_rep - club_rep) / 1000.0, 0.0, 1.0)
+				var pos_bonus := 2.0 if needed == POS_FLEX else (10.0 if raw_positions[i] == needed else 0.0)
+				# Same double-precision operations and RNG draws as _score_player.
+				score = bases[i] + fit * 30.0 + skill * 0.8 - overreach * (0.12 - skill * 0.003) \
+					+ pos_bonus + rng.randf_range(-noise_span, noise_span)
+			else:
+				var player: Variant = agents[i]
+				if typeof(player) != TYPE_DICTIONARY:
+					continue
+				if not Offer.evaluate(player, club, coach, offer_context)["accepted"]:
+					continue
+				score = _score_player(club, coach, player, needed, rng)
+			if score > best_score:
+				var wage_candidate: Dictionary = agents[i]
+				offer_context["offer_wage"] = PlayerMarketScript.wage_for_move(wage_candidate, club, true)
+				var wage_accepted: bool = Offer.evaluate(wage_candidate, club, coach, offer_context)["accepted"]
+				offer_context.erase("offer_wage")
+				if not wage_accepted:
+					continue
+				best_score = score
+				best_index = i
 	if best_index < 0:
 		return false
-	var signed: Dictionary = agents[best_index]
+	if bool(proposal.get("probe",false)):
+		proposal["index"]=best_index
+		return true
+	return _accept_agent(session,rng,club_id,club,best_index,agent_index)
+
+static func _accept_agent(session: Node,rng: RandomNumberGenerator,club_id: int,club: Dictionary,best_index: int,agent_index: Dictionary) -> bool:
+	var agents: Array=session.free_agents
+	if best_index<0 or best_index>=agents.size() or agent_index.get("consumed",{}).has(best_index):return false
+	var signed: Dictionary=agents[best_index]
+	var squad: Array=session.get_club_players(club_id)
+	if int(signed.get("club_id",0))!=0 or not _eligible(signed,club,squad,foreign_limit_for_club(session,club_id),POS_FLEX,true):return false
+	var native_reserves: Dictionary=agent_index.get("native_reserves",{})
+	var club_nation := int(club.get("country_id",0))
+	if _native_reserved(signed,club_nation,native_reserves,club_id):return false
 	if agent_index.is_empty():
 		agents.remove_at(best_index)
 	else:
 		agent_index["consumed"][best_index] = true
 	_attach_to_club(session, signed, club_id, club, rng, 0, "свободный агент")
+	var nation := int(signed.get("nationality_country_id", 0))
+	if nation > 0 and native_reserves.has(nation):
+		var supply: Dictionary = native_reserves[nation]["supply"]
+		var position := PlayerTypesScript.normalize_position(str(signed.get("position", "")))
+		supply[position] = maxi(0, int(supply.get(position, 0)) - 1)
+	if native_reserves.has(club_nation):
+		_update_native_reserve(session, club_id, native_reserves[club_nation])
+	if native_reserves.has(0):
+		var supply: Dictionary = native_reserves[0]["supply"]
+		var position := PlayerTypesScript.normalize_position(str(signed.get("position", "")))
+		supply[position] = maxi(0, int(supply.get(position, 0)) - 1)
+		_update_native_reserve(session, club_id, native_reserves[0])
 	return true
+
+
+## Protect the domestic players that capped clubs still need before exporting
+## them. No cap is waived and no extra players are generated.
+static func _build_native_reserves(session: Node) -> Dictionary:
+	# Scarcity also exists after retirement and expired contracts. Reserving only
+	# the supply needed to satisfy mandatory roster/cap constraints prevents an
+	# optional signing elsewhere from leaving a club unable to recruit legally.
+	var reserves := {0: {"clubs": [], "supply": {}, "demand": {}, "total_need": 0}}
+	for club in session._collect_session_clubs().values():
+		var cid := int(club.get("id", 0))
+		var nation := int(club.get("country_id", 0))
+		var cap := foreign_limit_for_club(session, cid)
+		reserves[0]["clubs"].append({"id": cid, "club": {"country_id": 0}, "cap": 0})
+		if cid <= 0 or nation <= 0 or cap < 0 or cap >= SQUAD_SIZE:
+			continue
+		if not reserves.has(nation):
+			reserves[nation] = {"clubs": [], "supply": {}, "demand": {}, "total_need": 0}
+		reserves[nation]["clubs"].append({"id": cid, "club": club, "cap": cap})
+	for player in session.free_agents:
+		var global_position := PlayerTypesScript.normalize_position(str(player.get("position", "")))
+		reserves[0]["supply"][global_position] = int(reserves[0]["supply"].get(global_position, 0)) + 1
+		var nation := int(player.get("nationality_country_id", 0))
+		if nation > 0 and reserves.has(nation):
+			var position := PlayerTypesScript.normalize_position(str(player.get("position", "")))
+			var supply: Dictionary = reserves[nation]["supply"]
+			supply[position] = int(supply.get(position, 0)) + 1
+	for nation in reserves:
+		_refresh_native_reserve(session, int(nation), reserves[nation])
+	return reserves
+
+
+static func _refresh_native_reserve(session: Node, _nation: int, reserve: Dictionary) -> void:
+	reserve["demand"] = {}
+	reserve["capacity"] = {}
+	reserve["club_state"] = {}
+	reserve["club_entries"] = {}
+	reserve["total_need"] = 0
+	for entry in reserve["clubs"]:
+		reserve["club_entries"][int(entry["id"])] = entry
+		_update_native_reserve(session, int(entry["id"]), reserve)
+
+
+static func _update_native_reserve(session: Node, club_id: int, reserve: Dictionary) -> void:
+	if not reserve["club_entries"].has(club_id):
+		return
+	var entry: Dictionary = reserve["club_entries"][club_id]
+	var previous: Dictionary = reserve["club_state"].get(club_id, {})
+	var old_need := int(previous.get("need", 0))
+	var old_counts: Dictionary = previous.get("counts", {})
+	var squad: Array = session.get_club_players(club_id)
+	var native_count := squad.size() - foreign_count(squad, entry["club"])
+	var needed := maxi(0, SQUAD_SIZE - int(entry["cap"]) - native_count)
+	var counts := PlayerTypesScript.count_squad_positions(squad)
+	reserve["total_need"] += needed - old_need
+	reserve["club_state"][club_id] = {"need": needed, "counts": counts}
+	for position in PlayerTypesScript.POSITIONS:
+		var missing := mini(maxi(0, PlayerTypesScript.squad_slot_min(position) - int(counts.get(position, 0))), needed)
+		var old_missing := mini(maxi(0, PlayerTypesScript.squad_slot_min(position) - int(old_counts.get(position, 0))), old_need)
+		reserve["demand"][position] = int(reserve["demand"].get(position, 0)) + missing - old_missing
+		var capacity := mini(maxi(0, PlayerTypesScript.squad_slot_max(position) - int(counts.get(position, 0))), needed)
+		var old_capacity := mini(maxi(0, PlayerTypesScript.squad_slot_max(position) - int(old_counts.get(position, 0))), old_need)
+		reserve["capacity"][position] = int(reserve["capacity"].get(position, 0)) + capacity - old_capacity
+
+
+static func _native_reserved(player: Dictionary, destination_nation: int, reserves: Dictionary, destination_club: int = 0) -> bool:
+	if reserves.has(0) and _reserve_blocks(player, destination_club, reserves[0]):
+		return true
+	var nation := int(player.get("nationality_country_id", 0))
+	if nation != destination_nation and reserves.has(destination_nation):
+		if _reserve_blocks(player, destination_club, reserves[destination_nation], false, false):
+			return true
+	if nation <= 0 or not reserves.has(nation):
+		return false
+	var reserve: Dictionary = reserves[nation]
+	return _reserve_blocks(player, destination_club if nation == destination_nation else 0, reserve)
+
+
+static func _reserve_blocks(player: Dictionary, destination_club: int, reserve: Dictionary, consume_supply: bool = true, native_incoming: bool = true) -> bool:
+	var position := PlayerTypesScript.normalize_position(str(player.get("position", "")))
+	var supply: Dictionary = reserve["supply"]
+	var own: Dictionary = reserve["club_state"].get(destination_club, {})
+	var need := int(own.get("need", 0))
+	var counts: Dictionary = own.get("counts", {})
+	var demand := int(reserve["demand"].get(position, 0))
+	var own_missing := maxi(0, PlayerTypesScript.squad_slot_min(position) - int(counts.get(position, 0))) if need > 0 else 0
+	var demand_after := demand - int(own_missing > 0)
+	var available := int(supply.get(position, 0))
+	if maxi(0, demand_after - available + int(consume_supply)) > maxi(0, demand - available):
+		return true
+	var usable_before := 0
+	var usable_after := 0
+	for code in PlayerTypesScript.POSITIONS:
+		var capacity := int(reserve["capacity"].get(code, 0))
+		var capacity_after := capacity
+		if need > 0:
+			var room := maxi(0, PlayerTypesScript.squad_slot_max(code) - int(counts.get(code, 0)))
+			capacity_after += mini(maxi(0, room - int(code == position)), need - int(native_incoming)) - mini(room, need)
+		usable_before += mini(int(supply.get(code, 0)), capacity)
+		usable_after += mini(maxi(0, int(supply.get(code, 0)) - int(consume_supply and code == position)), capacity_after)
+	var total_need := int(reserve["total_need"])
+	return maxi(0, total_need - int(need > 0 and native_incoming) - usable_after) > maxi(0, total_need - usable_before)
 
 
 static func next_needed_position(squad: Array) -> String:
@@ -333,14 +512,11 @@ static func _eligible(
 static func _position_ok(position: String, needed: String, relaxed: bool, squad: Array) -> bool:
 	if not PlayerTypesScript.can_add_squad_position(squad, position):
 		return false
-	if needed == POS_FLEX:
-		return true
-	if position == needed:
-		return true
-	# Last-day relax: any legal slot, even if a min (FB etc.) is still missing.
-	if relaxed:
-		return true
-	return false
+	var missing := PlayerTypesScript.missing_required_position(squad)
+	if not missing.is_empty():
+		var counts := PlayerTypesScript.count_squad_positions(squad)
+		return int(counts.get(position, 0)) < PlayerTypesScript.squad_slot_min(position)
+	return needed == POS_FLEX or position == needed
 
 
 static func is_foreigner(player: Dictionary, club: Dictionary) -> bool:
@@ -399,8 +575,11 @@ static func _score_player(
 	needed: String,
 	rng: RandomNumberGenerator
 ) -> float:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		return native.score_transfer(club,player,CoachTypesScript.transfers_of(coach),needed,rng)
 	var skill := float(CoachTypesScript.transfers_of(coach))
-	var club_rep := float(int(club.get("reputation", 500)))
+	var club_rep := Offer.Attraction.value(club)
 	var player_rep := float(int(player.get("reputation", 0)))
 	var ca := float(int(player.get("current_ability", player.get("overall", 0))))
 	var pa := float(int(player.get("potential_ability", ca)))
@@ -437,6 +616,7 @@ static func _attach_to_club(
 	PlayerStats.begin_club_stint(player, int(session.season_number), club_id, maxi(0, fee))
 	player["club_id"] = club_id
 	player["contract_status"] = "club"
+	player.erase("free_agent_seasons")
 	player["for_sale"] = false
 	player.erase("asking_price")
 	var years := _roll_contract_years(rng, int(player.get("age", 24)))
@@ -520,59 +700,12 @@ static func _list_surplus(session: Node, clubs: Dictionary) -> int:
 	return listed
 
 
-static func _run_upgrade_wave(
-	session: Node,
-	clubs: Dictionary,
-	rng: RandomNumberGenerator
-) -> Dictionary:
-	var bought := 0
-	var bids := 0
-	var protected_ids: Dictionary = {}
-	var order: Array = _club_pick_order(session, clubs, rng)
-	var quota := maxi(1, int(ceili(float(clubs.size()) / 5.0)))
-	var tried_today := 0
-	var moved: Dictionary = {}
-	# Local to this wave. Deals invalidate both sides before the next buyer.
-	var squad_cache := {}
-	for club_id in order:
-		if tried_today >= quota:
-			break
-		var id := int(club_id)
-		var club: Dictionary = clubs.get(id, {})
-		if club.is_empty():
-			continue
-		if int(club.get("upgrade_bid_season", 0)) == int(session.season_number):
-			continue
-		if session.get_club_players(id).size() != SQUAD_SIZE:
-			continue
-		if int(session.get_club_budget(id)) <= 0:
-			continue
-		var squad: Array = session.get_club_players(id)
-		var coach: Dictionary = session.get_club_coach(id)
-		var outgoing := _pick_outgoing(session, id, squad, coach)
-		if outgoing.is_empty():
-			continue
-		var target: Dictionary = _find_upgrade_target(
-			session, clubs, id, club, coach, outgoing, moved, rng, squad_cache
-		)
-		club["upgrade_bid_season"] = int(session.season_number)
-		if target.is_empty():
-			continue
-		tried_today += 1
-		bids += 1
-		var player: Dictionary = target.get("player", {})
-		var seller_id: int = int(target.get("seller_id", 0))
-		if not bool(target.get("accepted", false)):
-			_log_bid(session, id, club, clubs.get(seller_id, {}), player, str(target.get("reason", "отказ")))
-			continue
-		if _execute_upgrade(session, clubs, id, seller_id, outgoing, player, rng):
-			squad_cache.erase(id)
-			squad_cache.erase(seller_id)
-			bought += 1
-			protected_ids[id] = true
-			moved[int(player.get("id", 0))] = true
-			moved[int(outgoing.get("id", 0))] = true
-	return {"bought": bought, "bids": bids, "protected": protected_ids}
+static func _run_upgrade_wave(session: Node,clubs: Dictionary,rng: RandomNumberGenerator) -> Dictionary:
+	var planner: RefCounted=load("res://game/transfer_planner.gd").new(load("res://game/transfer_market.gd"),session,clubs,rng)
+	while not planner.step():pass
+	var result: Dictionary=planner.result.duplicate()
+	result["protected"]=planner.protected
+	return result
 
 
 static func _pick_outgoing(
@@ -641,6 +774,7 @@ static func _find_upgrade_target(
 	var candidates: Array = []
 	var buyer_squad: Array = session.get_club_players(buyer_id)
 	var buyer_limit := foreign_limit_for_club(session, buyer_id)
+	var world_top := Offer.world_top_reputation(clubs)
 	for club_id in clubs.keys():
 		var seller_id := int(club_id)
 		if seller_id == buyer_id:
@@ -657,7 +791,7 @@ static func _find_upgrade_target(
 				continue
 			if int(player.get("current_ability", 0)) < out_ca + UPGRADE_CA_GAP:
 				continue
-			if info["starters"].has(pid):
+			if not _seller_can_spare(session, seller_id, seller_squad, player):
 				continue
 			var fee := _upgrade_fee(player)
 			if fee > cap:
@@ -670,7 +804,11 @@ static func _find_upgrade_target(
 				buyer_limit
 			):
 				continue
+			var context := _offer_context(buyer_squad, int(round(Offer.Attraction.value(clubs[seller_id]))))
+			context["world_top_reputation"] = world_top
+			var player_accepts := _destination_score(player, buyer, coach, context) >= 0.0
 			candidates.append({
+				"player_accepts": player_accepts,
 				"player": player,
 				"seller_id": seller_id,
 				"fee": fee,
@@ -682,12 +820,16 @@ static func _find_upgrade_target(
 		return float(a["score"]) > float(b["score"])
 	)
 	var top: Dictionary = candidates[0]
-	var player: Dictionary = top.get("player", {})
-	var seller: Dictionary = clubs.get(int(top.get("seller_id", 0)), {})
-	if _destination_score(player, buyer, coach) < 0.0:
+	for candidate in candidates:
+		if bool(candidate["player_accepts"]):
+			top = candidate
+			break
+	if not bool(top["player_accepts"]):
 		top["accepted"] = false
 		top["reason"] = "игрок отказал"
 		return top
+	var player: Dictionary = top.get("player", {})
+	var seller: Dictionary = clubs.get(int(top.get("seller_id", 0)), {})
 	if not _seller_accepts_upgrade(player, seller, int(top.get("fee", 0))):
 		top["accepted"] = false
 		top["reason"] = "клуб отказал"
@@ -702,16 +844,36 @@ static func _seller_can_spare(
 	squad: Array,
 	player: Dictionary
 ) -> bool:
-	if _is_scheme_starter(session, seller_id, player, squad):
-		return false
 	var pos := PlayerTypesScript.normalize_position(str(player.get("position", "")))
 	var have := 0
+	var peers: Array = []
 	for row in squad:
 		if typeof(row) != TYPE_DICTIONARY:
 			continue
 		if PlayerTypesScript.normalize_position(str(row.get("position", ""))) == pos:
 			have += 1
-	return have > PlayerTypesScript.squad_slot_min(pos)
+			if int(row.get("id", 0)) != int(player.get("id", 0)):
+				peers.append(int(row.get("current_ability", 0)))
+	if have <= PlayerTypesScript.squad_slot_min(pos):
+		return false
+	if _is_scheme_starter(session, seller_id, player, squad):
+		peers.sort()
+		peers.reverse()
+		var starters := YouthGraduationScript.starter_count("3-2-2", pos)
+		if peers.size() < starters or int(peers[starters - 1]) < int(player.get("current_ability", 0)) - STARTER_COVER_CA_GAP:
+			return false
+	return true
+
+static func _seller_can_spare_info(info: Dictionary,player: Dictionary) -> bool:
+	var pos := PlayerTypesScript.normalize_position(str(player.get("position","")))
+	if int(info.counts.get(pos,0))<=PlayerTypesScript.squad_slot_min(pos):return false
+	if not info.starters.has(int(player.id)):return true
+	var peers := []
+	for row in info.positions.get(pos,[]):
+		if int(row.id)!=int(player.id):peers.append(int(row.get("current_ability",0)))
+	peers.sort();peers.reverse()
+	var n := YouthGraduationScript.starter_count("3-2-2",pos)
+	return peers.size()>=n and int(peers[n-1])>=int(player.get("current_ability",0))-STARTER_COVER_CA_GAP
 
 
 static func _seller_accepts_upgrade(player: Dictionary, _seller: Dictionary, fee: int) -> bool:
@@ -756,7 +918,7 @@ static func _squad_market_info(session: Node, club_id: int, squad: Array) -> Dic
 	var coach: Dictionary = session.get_club_coach(club_id)
 	var formation := CoachTypesScript.primary_formation_of(coach)
 	if formation.is_empty():
-		formation = "2-3-2"
+		formation = "3-2-2"
 	var positions := {}
 	var counts := {}
 	var starters := {}
@@ -791,7 +953,7 @@ static func _is_scheme_starter(
 	var coach: Dictionary = session.get_club_coach(club_id)
 	var formation := CoachTypesScript.primary_formation_of(coach)
 	if formation.is_empty():
-		formation = "2-3-2"
+		formation = "3-2-2"
 	return YouthGraduationScript.is_starter(player, squad, formation)
 
 
@@ -807,6 +969,8 @@ static func _execute_upgrade(
 	var buyer: Dictionary = clubs.get(buyer_id, {})
 	var seller: Dictionary = clubs.get(seller_id, {})
 	if buyer.is_empty() or seller.is_empty():
+		return false
+	if not _seller_can_spare(session, seller_id, session.get_club_players(seller_id), incoming):
 		return false
 	var fee := _upgrade_fee(incoming)
 	var incoming_id := int(incoming.get("id", 0))
@@ -901,9 +1065,11 @@ static func _run_club_to_club_wave(
 	session: Node,
 	clubs: Dictionary,
 	rng: RandomNumberGenerator,
-	protected_sellers: Variant = {}
+	_protected_sellers: Variant = {}
 ) -> int:
-	var protected: Dictionary = protected_sellers if typeof(protected_sellers) == TYPE_DICTIONARY else {}
+	var allowance := paid_allowance(session, clubs)
+	if allowance <= 0:
+		return 0
 	var buyers: Dictionary = {}
 	for club_id in clubs.keys():
 		var id := int(club_id)
@@ -923,15 +1089,17 @@ static func _run_club_to_club_wave(
 
 	var bought := 0
 	var moved: Dictionary = {}
-	# Buyers leave the wave after their first purchase. Their squads, budgets
-	# and foreign limits stay unchanged until then (buyers cannot be sellers).
+	# Buyers may make several needed purchases. Invalidate both sides' cached
+	# budgets, foreign counts and positions after every completed deal.
 	var buyer_cache := {}
 	for player in targets:
+		if bought >= allowance:
+			break
 		var pid := int(player.get("id", 0))
 		if moved.has(pid):
 			continue
 		var seller_id := int(player.get("club_id", 0))
-		if seller_id < 1 or buyers.has(seller_id) or protected.has(seller_id):
+		if seller_id < 1:
 			continue
 		if not is_buyable(player, int(session.season_number)):
 			continue
@@ -941,7 +1109,11 @@ static func _run_club_to_club_wave(
 		if _execute_club_sale(session, clubs, player, seller_id, deal, rng):
 			bought += 1
 			moved[pid] = true
-			buyers.erase(int(deal.get("club_id", 0)))
+			var buyer_id := int(deal.get("club_id", 0))
+			buyer_cache.erase(buyer_id)
+			buyer_cache.erase(seller_id)
+			if session.get_club_players(buyer_id).size() >= SQUAD_SIZE:
+				buyers.erase(buyer_id)
 	return bought
 
 
@@ -965,6 +1137,8 @@ static func _pick_buyer_for_player(
 	rng: RandomNumberGenerator,
 	buyer_cache: Dictionary = {}
 ) -> Dictionary:
+	if not _seller_can_spare(session, seller_id, session.get_club_players(seller_id), player):
+		return {}
 	var ask := _asking_price(player)
 	var seller: Dictionary = clubs.get(seller_id, {})
 	var listed := bool(player.get("for_sale", false))
@@ -980,7 +1154,7 @@ static func _pick_buyer_for_player(
 		if squad.size() >= SQUAD_SIZE:
 			continue
 		if not buyer_cache.has(id):
-			buyer_cache[id] = _buyer_info(session, id, club, squad)
+			buyer_cache[id] = _buyer_info(session, id, club, squad, Offer.world_top_reputation(clubs))
 		var info: Dictionary = buyer_cache[id]
 		var needed: String = info["needed"]
 		var position := PlayerTypesScript.normalize_position(str(player.get("position", "")))
@@ -990,7 +1164,10 @@ static func _pick_buyer_for_player(
 		if ask > cap:
 			continue
 		var coach: Dictionary = info["coach"]
-		if _destination_score(player, club, coach) < 0.0:
+		var offer_context: Dictionary = info["offer_context"]
+		offer_context["source_reputation"] = int(round(Offer.Attraction.value(seller)))
+		var destination := _destination_score(player, club, coach, offer_context)
+		if destination < 0.0:
 			continue
 		if not listed and not _seller_accepts(player, seller, ask):
 			continue
@@ -998,7 +1175,7 @@ static func _pick_buyer_for_player(
 			continue
 		candidates.append({
 			"club_id": id,
-			"score": _destination_score(player, club, coach),
+			"score": destination,
 		})
 	if candidates.is_empty():
 		return {}
@@ -1008,13 +1185,14 @@ static func _pick_buyer_for_player(
 	return candidates[0]
 
 
-static func _buyer_info(session: Node, id: int, club: Dictionary, squad: Array) -> Dictionary:
+static func _buyer_info(session: Node, id: int, club: Dictionary, squad: Array, world_top_reputation: int = 0) -> Dictionary:
 	var needed := next_needed_position(squad)
 	var legal := {}
 	for position in PlayerTypesScript.POSITIONS:
 		legal[position] = not needed.is_empty() and _position_ok(position, needed, false, squad)
 	var limit := foreign_limit_for_club(session, id)
 	return {"needed": needed, "positions": legal,
+		"offer_context": _offer_context(squad, 0, world_top_reputation),
 		"foreign_cap": limit >= 0 and foreign_count(squad, club) >= limit,
 		"cap": ClubFinanceScript.max_single_fee(int(session.get_club_budget(id))),
 		"coach": session.get_club_coach(id)}
@@ -1065,15 +1243,22 @@ static func _player_value(player: Dictionary) -> int:
 	return maxi(5000, int(player.get("value", 0)))
 
 
-static func _destination_score(player: Dictionary, club: Dictionary, coach: Dictionary) -> float:
-	var skill := float(CoachTypesScript.transfers_of(coach))
-	var club_rep := float(int(club.get("reputation", 500)))
-	var player_rep := float(int(player.get("reputation", 0)))
-	var reach := club_rep + (skill - 10.0) * 28.0
-	if player_rep > reach + 90.0:
-		return -1.0
-	var fit := 1.0 - clampf(absf(player_rep - club_rep) / 1000.0, 0.0, 1.0)
-	return club_rep * 0.5 + fit * 40.0 + skill
+static func _destination_score(player: Dictionary, club: Dictionary, coach: Dictionary, context: Dictionary = {}) -> float:
+	context["offer_wage"] = PlayerMarketScript.wage_for_move(player, club)
+	return float(Offer.evaluate(player, club, coach, context)["score"])
+
+static func _offer_context(squad: Array, source_reputation: int = 0, world_top_reputation: int = 0) -> Dictionary:
+	var abilities: Array = []
+	for player in squad:
+		if typeof(player) == TYPE_DICTIONARY:
+			abilities.append(PlayerMarketScript.ability_of(player))
+	abilities.sort()
+	abilities.reverse()
+	var count := mini(8, abilities.size())
+	var total := 0.0
+	for i in count:
+		total += float(abilities[i])
+	return {"squad_ability": total / float(count) if count > 0 else -1.0, "source_reputation": source_reputation, "world_top_reputation": world_top_reputation}
 
 
 static func _execute_club_sale(
@@ -1089,6 +1274,10 @@ static func _execute_club_sale(
 	var buyer: Dictionary = clubs.get(buyer_id, {})
 	var seller: Dictionary = clubs.get(seller_id, {})
 	if buyer.is_empty() or seller.is_empty():
+		return false
+	if fee > ClubFinanceScript.max_single_fee(int(session.get_club_budget(buyer_id))):
+		return false
+	if not _seller_can_spare(session, seller_id, session.get_club_players(seller_id), player):
 		return false
 	if not _remove_from_squad(session, seller_id, int(player.get("id", 0))):
 		return false
@@ -1139,10 +1328,22 @@ static func _release_unsold_listed(session: Node, clubs: Dictionary) -> int:
 		var id := int(club_id)
 		var club: Dictionary = clubs.get(id, {})
 		var kept: Array = []
+		var remaining: Array = session.get_club_players(id).duplicate()
 		for player in session.get_club_players(id):
 			if typeof(player) != TYPE_DICTIONARY:
 				continue
 			if bool(player.get("for_sale", false)):
+				if not _seller_can_spare(session, id, remaining, player):
+					player["for_sale"] = false
+					player.erase("asking_price")
+					kept.append(player)
+					continue
+				# An unsold listing is not an expired contract. Preserve the
+				# asset for the next window instead of gifting it to free agents.
+				if int(player.get("contract_years", 0)) > 0:
+					kept.append(player)
+					continue
+				remaining.erase(player)
 				player["for_sale"] = false
 				player.erase("asking_price")
 				player["club_id"] = 0
@@ -1169,3 +1370,109 @@ static func _release_unsold_listed(session: Node, clubs: Dictionary) -> int:
 				kept.append(player)
 		session.players_by_club[id] = kept
 	return unsold
+
+
+## Reuse position groups across buyers; consumed dictionaries change club_id.
+static func _free_position_groups(agents: Array) -> Dictionary:
+	var groups := {}
+	for player in agents:
+		if typeof(player) != TYPE_DICTIONARY or int(player.get("age", 18)) < 18 or bool(player.get("is_youth", false)):
+			continue
+		var pos := PlayerTypesScript.normalize_position(str(player.get("position", "")))
+		if not groups.has(pos):
+			groups[pos] = []
+		groups[pos].append(player)
+	for pos in groups:
+		groups[pos].sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return PlayerMarketScript.ability_of(a) > PlayerMarketScript.ability_of(b))
+	return groups
+
+static func _termination_cost(session: Node, player: Dictionary) -> int:
+	var paid := 1 if int(session.wages_paid_for_season) == int(session.season_number) else 0
+	return maxi(0, int(player.get("contract_years", 0)) - paid) * int(player.get("wage", 0))
+
+static func _find_free_swap(session: Node, clubs: Dictionary, cid: int, groups: Dictionary, required: String = "", outgoing_position: String = "") -> Dictionary:
+	var club: Dictionary = clubs[cid]
+	var squad: Array = session.get_club_players(cid)
+	var info := _squad_market_info(session, cid, squad)
+	var context := _offer_context(squad, 0, Offer.world_top_reputation(clubs))
+	context["role"] = "first_team"
+	var coach: Dictionary = session.get_club_coach(cid)
+	var limit := foreign_limit_for_club(session, cid)
+	var best := {}
+	var best_gain := -INF
+	for outgoing in squad:
+		var out_id := int(outgoing.get("id", 0))
+		if info["starters"].has(out_id) or is_transfer_locked(outgoing, int(session.season_number)):
+			continue
+		var pos := PlayerTypesScript.normalize_position(str(outgoing.get("position", "")))
+		if not outgoing_position.is_empty() and pos != outgoing_position:
+			continue
+		if not required.is_empty() and int(info["counts"].get(pos, 0)) <= PlayerTypesScript.squad_slot_min(pos):
+			continue
+		var cost := _termination_cost(session, outgoing)
+		var incoming_pos := required if not required.is_empty() else pos
+		for incoming in groups.get(incoming_pos, []):
+			if int(incoming.get("club_id", 0)) != 0:
+				continue
+			var gain := PlayerMarketScript.ability_of(incoming) - PlayerMarketScript.ability_of(outgoing)
+			if required.is_empty() and gain < UPGRADE_CA_GAP:
+				break
+			if gain <= best_gain:
+				continue
+			if not _foreign_ok_after_swap(squad, club, outgoing, incoming, limit):
+				continue
+			context["offer_wage"] = PlayerMarketScript.wage_for_move(incoming, club, true)
+			if int(session.get_club_budget(cid)) < cost + int(context["offer_wage"]):
+				continue
+			if not Offer.evaluate(incoming, club, coach, context)["accepted"]:
+				continue
+			best = {"incoming": incoming, "outgoing": outgoing, "termination_cost": cost}
+			best_gain = gain
+	return best
+
+static func _execute_free_swap(session: Node, clubs: Dictionary, cid: int, swap: Dictionary, rng: RandomNumberGenerator) -> bool:
+	var incoming: Dictionary = swap["incoming"]
+	var outgoing: Dictionary = swap["outgoing"]
+	var free_index: int = session.free_agents.find(incoming)
+	if free_index < 0 or _is_scheme_starter(session, cid, outgoing, session.get_club_players(cid)):
+		return false
+	if not _remove_from_squad(session, cid, int(outgoing["id"])):
+		return false
+	session.free_agents.remove_at(free_index)
+	session.adjust_club_budget(cid, -int(swap["termination_cost"]))
+	_attach_to_club(session, incoming, cid, clubs[cid], rng, 0, "свободный агент")
+	_release_to_agents(session, cid, _club_label(clubs[cid], cid), outgoing)
+	return true
+
+static func _repair_full_squads(session: Node, clubs: Dictionary, rng: RandomNumberGenerator, only_club_id: int = 0, groups: Dictionary = {}) -> int:
+	var repaired := 0
+	if groups.is_empty():
+		groups = _free_position_groups(session.free_agents)
+	for cid in ([only_club_id] if only_club_id > 0 else clubs.keys()):
+		var squad: Array = session.get_club_players(int(cid))
+		while squad.size() == SQUAD_SIZE:
+			var needed := PlayerTypesScript.missing_required_position(squad)
+			var counts := PlayerTypesScript.count_squad_positions(squad)
+			var overflowing := ""
+			for pos in PlayerTypesScript.POSITIONS:
+				if int(counts.get(pos, 0)) > PlayerTypesScript.squad_slot_max(pos):
+					overflowing = pos
+					break
+			if needed.is_empty() and overflowing.is_empty():
+				break
+			var swap := {}
+			if not needed.is_empty():
+				swap = _find_free_swap(session, clubs, int(cid), groups, needed, overflowing)
+			else:
+				for pos in PlayerTypesScript.POSITIONS:
+					if int(counts.get(pos, 0)) >= PlayerTypesScript.squad_slot_max(pos):
+						continue
+					swap = _find_free_swap(session, clubs, int(cid), groups, pos, overflowing)
+					if not swap.is_empty():
+						break
+			if swap.is_empty() or not _execute_free_swap(session, clubs, int(cid), swap, rng):
+				break
+			repaired += 1
+			squad = session.get_club_players(int(cid))
+	return repaired

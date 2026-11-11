@@ -1,0 +1,4 @@
+[gd_scene load_steps=2 format=3]
+[ext_resource type="Script" path="res://tests/performance/football_world_acceptance.gd" id="1"]
+[node name="FootballWorldAcceptance" type="Node"]
+script = ExtResource("1")

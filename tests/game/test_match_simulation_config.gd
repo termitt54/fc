@@ -30,6 +30,7 @@ func _run() -> void:
 	_test_schema_covers_groups()
 	_test_clamp_and_unknown_keys()
 	_test_save_load_roundtrip()
+	_test_settings_fingerprint()
 	_test_engine_uses_live_knobs()
 	_test_fitness_curves()
 	_test_stamina_and_recovery_knobs()
@@ -46,8 +47,8 @@ func _test_defaults_match_engine_constants() -> void:
 		"default chances_per_phase matches MatchTypes"
 	)
 	_assert(
-		is_equal_approx(float(values["home_advantage"]), MatchTypesScript.HOME_ADVANTAGE),
-		"default home_advantage matches MatchTypes"
+		is_equal_approx(float(values["duel_skill_influence"]), 1.0),
+		"default duel_skill_influence matches MatchTypes"
 	)
 	_assert(
 		is_equal_approx(float(values["condition_after_stamina_10"]), MatchTypesScript.CONDITION_AFTER_STAMINA_10),
@@ -88,7 +89,7 @@ func _test_schema_covers_groups() -> void:
 				break
 		_assert(found, "group %s has at least one knob" % group_id)
 	_assert(
-		MatchSimConfigScript.format_value(MatchSimConfigScript.knob_by_key("home_advantage"), 0.075) == "7.5%",
+		MatchSimConfigScript.format_value(MatchSimConfigScript.knob_by_key("duel_skill_influence"), 0.75) == "75%",
 		"percent knobs render as percents"
 	)
 
@@ -120,19 +121,21 @@ func _test_clamp_and_unknown_keys() -> void:
 func _test_save_load_roundtrip() -> void:
 	var custom := MatchSimConfigScript.default_values()
 	custom["chances_per_phase"] = 1.80
-	custom["home_advantage"] = 0.15
+	custom["duel_skill_influence"] = 0.15
 	var saved: Dictionary = MatchSimConfigScript.apply_values(custom, true)
+	var saved_fingerprint := MatchSimConfigScript.fingerprint()
 	_assert(bool(saved.get("ok", false)), "custom knobs save")
 	_assert(FileAccess.file_exists(TEST_PATH), "config file is written")
 
 	MatchSimConfigScript.unload()
+	_assert(saved_fingerprint == MatchSimConfigScript.fingerprint(), "saving and loading preserves the exact settings fingerprint")
 	_assert(
 		is_equal_approx(MatchSimConfigScript.get_f("chances_per_phase"), 1.80),
 		"reloaded chances_per_phase"
 	)
 	_assert(
-		is_equal_approx(MatchSimConfigScript.get_f("home_advantage"), 0.15),
-		"reloaded home_advantage"
+		is_equal_approx(MatchSimConfigScript.get_f("duel_skill_influence"), 0.15),
+		"reloaded duel_skill_influence"
 	)
 	_assert(
 		is_equal_approx(MatchSimConfigScript.get_f("shot_conversion_base"), MatchTypesScript.SHOT_CONVERSION_BASE),
@@ -162,6 +165,17 @@ func _test_save_load_roundtrip() -> void:
 		is_equal_approx(MatchSimConfigScript.get_f("chances_per_phase"), MatchTypesScript.CHANCES_PER_PHASE),
 		"persist reset writes defaults back to disk"
 	)
+
+
+func _test_settings_fingerprint() -> void:
+	MatchSimConfigScript.reset_to_defaults(false)
+	var first := MatchSimConfigScript.fingerprint()
+	_assert(first.length() == 64, "configuration has a SHA-256 fingerprint")
+	_assert(first == MatchSimConfigScript.fingerprint(), "unchanged configuration keeps the fingerprint")
+	MatchSimConfigScript.apply_values({"chances_per_phase": 0.40}, false)
+	_assert(first != MatchSimConfigScript.fingerprint(), "changing a live setting updates its fingerprint")
+	MatchSimConfigScript.reset_to_defaults(false)
+	_assert(first == MatchSimConfigScript.fingerprint(), "restoring settings restores their fingerprint")
 
 
 func _test_engine_uses_live_knobs() -> void:

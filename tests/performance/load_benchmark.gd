@@ -101,6 +101,9 @@ func _run() -> void:
         "continue_squad_errors": _continue_squad_errors, "squad_violations": _squad_violations,
         "status": "running", "completed_seasons": 0,
         "scope": "Headless editor build; actual game session, synthetic small leagues; engine-tracked memory, not total process RSS"}
+    _report["backend"] = NativeSimulation.backend()
+    _report["match_settings"] = MatchSimulationConfig.snapshot()
+    _report["settings_fingerprint"] = MatchSimulationConfig.fingerprint()
     if not _failures.is_empty():
         _finish(false)
         return
@@ -116,6 +119,7 @@ func _run() -> void:
     GameSession.save_slot = _slot
     GameSession._rng.seed = int(_options["seed"]) + 1
     _report["initial_players"] = _player_count()
+    _report["initial_state_digest"] = _fingerprint(false)
     _report["initial_matches"] = _match_count()
     if not _validate("initial"):
         _finish(false)
@@ -399,7 +403,11 @@ func _squad_issue(message: String) -> void:
         _failures.append(message)
 
 
-func _fingerprint() -> String:
+func _fingerprint(include_archive_path: bool = true) -> String:
+    return _digest(_fingerprint_rows(include_archive_path))
+
+
+func _fingerprint_rows(include_archive_path: bool = true) -> Array:
     # Scalar rows, sorted by ID; excludes transient rating caches.
     var players: Array = []
     for map in [GameSession.players_by_club, GameSession.youth_players_by_club, GameSession.reserve_players_by_club]:
@@ -408,11 +416,16 @@ func _fingerprint() -> String:
     players.append_array(GameSession.free_agents)
     players.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a["id"]) < int(b["id"]))
     var rows: Array = [GameSession.season_number, GameSession.season_day, GameSession._rng.state,
-        GameSession._next_player_id, GameSession._next_match_id, GameSession.history_head]
+        GameSession._next_player_id, GameSession._next_match_id, GameSession.history_head if include_archive_path else ""]
     for player in players:
+        # New, unused youth may have no row yet. Loading materializes its all-zero
+        # row; compare the same logical statistics without mutating either state.
+        var season_stats: Dictionary = player.get("season_stats", {})
+        if season_stats.is_empty():
+            season_stats = PlayerStats.blank(GameSession.season_number, int(player["club_id"]))
         rows.append([player["id"], player["club_id"], player["age"], player["current_ability"],
             player["potential_ability"], player["contract_years"], player["condition"], player["morale"],
-            player.get("season_stats", {}), player.get("career_stats", [])])
+            season_stats, player.get("career_stats", [])])
     var ids: Array = GameSession.club_budgets.keys()
     ids.sort()
     for id in ids:
@@ -420,7 +433,7 @@ func _fingerprint() -> String:
     for unit in GameSession.units:
         rows.append(unit.get("standings", []))
         rows.append(unit.get("winners", []))
-    return _digest(rows)
+    return rows
 
 
 func _digest(value: Variant) -> String:
@@ -431,7 +444,14 @@ func _digest(value: Variant) -> String:
 
 
 func _roundtrip() -> bool:
-    var before: String = _fingerprint()
+    # A completed tournament appends its archive on the next flush/save. Establish
+    # that committed history head before comparing the save/load round trip.
+    var history_start: int = Time.get_ticks_usec()
+    if not _check_result(GameSession._flush_history(), "flush history before roundtrip"):
+        return false
+    _record("history_flush", history_start)
+    var before_rows: Array = _fingerprint_rows().duplicate(true)
+    var before: String = _digest(before_rows)
     var start: int = Time.get_ticks_usec()
     if not _check_result(GameSession.save_game(_slot), "save"):
         return false
@@ -442,6 +462,12 @@ func _roundtrip() -> bool:
         return false
     _record("load", start)
     if before != _fingerprint():
+        var after_rows: Array = _fingerprint_rows()
+        print("ROUNDTRIP semantic_equal=",before_rows==after_rows)
+        for index in mini(before_rows.size(),after_rows.size()):
+            if before_rows[index]!=after_rows[index]:
+                print("ROUNDTRIP first_difference row=",index," before=",before_rows[index]," after=",after_rows[index])
+                break
         _failures.append("Save/load changed scalar state or RNG")
     return _validate("roundtrip")
 
@@ -493,6 +519,8 @@ func _finish(success: bool) -> void:
         _report["status"] = "completed_with_squad_violations"
         success = false
     _report["final_players"] = _player_count()
+    _report["final_state_digest"] = _fingerprint(false)
+    _report["state_digest_scope"] = "Simulation scalars, statistics, standings, budgets and RNG; archive segment path excluded"
     _report["peak_memory_mib"] = float(OS.get_static_memory_peak_usage()) / 1048576.0
     _write_report()
     print("BENCH END status=", _report["status"], " completed_seasons=", _report.get("completed_seasons", 0), " failures=", JSON.stringify(_failures))

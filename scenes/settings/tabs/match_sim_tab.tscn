@@ -47,7 +47,7 @@ text = "Симуляция матчей"
 layout_mode = 2
 theme_override_colors/font_color = Color(0.72, 0.8, 0.84, 1)
 theme_override_font_sizes/font_size = 13
-text = "Точечная калибровка движка 8 на 8. Усталость и восстановление задаются точками 1 / 10 / 20 — сохраните и крутите под себя. Изменённые ползунки подсвечиваются."
+text = "Выберите раздел. У каждого параметра есть объяснение и рекомендуемое значение. Начните с основных настроек; редкие параметры спрятаны в «Дополнительные». После изменений нажмите «Сохранить»."
 autowrap_mode = 3
 
 [node name="Sections" type="VBoxContainer" parent="Scroll/Center/Card/Pad/Body"]
@@ -65,7 +65,7 @@ custom_minimum_size = Vector2(0, 34)
 layout_mode = 2
 script = ExtResource("2_button")
 kind = 1
-text = "По умолчанию"
+text = "Рекомендуемые для всех разделов"
 
 [node name="StatusLabel" type="Label" parent="Scroll/Center/Card/Pad/Body/Actions"]
 unique_name_in_owner = true

@@ -16,6 +16,8 @@ const RETIREMENT_AGE_MIN := 33
 const RETIREMENT_AGE_MAX := 42
 const RETIREMENT_DECLINE_CA := 42
 const RETIREMENT_DECLINE_CHANCE := 0.35
+const FREE_AGENT_RETIREMENT_SEASONS := 5
+const FREE_AGENT_RETAIN_CA := 70
 
 ## Share of the remaining gap to the personal ceiling closed per season. Growth
 ## is proportional to what is left, so a talent converges on his potential while
@@ -53,14 +55,8 @@ const LEVEL_NEUTRAL := 10
 const FACILITY_WEIGHT := 0.6
 const COACHING_WEIGHT := 0.4
 
-## The player's own application. Personality already carries his characters —
-## PROFESSIONAL and AMBITIOUS bias exactly these two scales at generation — so
-## the characters count here without a second bonus. Using mental attributes
-## instead would feed CA back into its own growth rate and would only bite for
-## the positions that weight them.
-const DRIVE_KEYS := ["professionalism", "ambition"]
-const DRIVE_FLOOR := 0.80
-const DRIVE_SPAN := 0.40
+## One dominant character supplies the development modifier, without hidden scales.
+const PROFESSIONAL_GROWTH_FACTOR := 1.25
 
 ## Academy and reserve football is not simulated, so those squads develop on a
 ## notional workload instead of their (empty) first-team minutes.
@@ -109,6 +105,11 @@ static func ensure_retirement_age(player: Dictionary, rng: RandomNumberGenerator
 
 ## Checked in the off-season, after ageing.
 static func should_retire(player: Dictionary, rng: RandomNumberGenerator) -> bool:
+	# The completed clubless season is counted before the off-season retirement pass.
+	if int(player.get("club_id", 0)) <= 0 \
+		and int(player.get("free_agent_seasons", 0)) >= FREE_AGENT_RETIREMENT_SEASONS \
+		and int(player.get("current_ability", 0)) < FREE_AGENT_RETAIN_CA:
+		return true
 	var age := int(player.get("age", 20))
 	var limit := ensure_retirement_age(player, rng)
 	if age >= limit:
@@ -152,6 +153,10 @@ static func develop_player(
 	playing_share: float = MINUTES_SHARE_UNKNOWN,
 	season: int = 0
 ) -> void:
+	var native: Variant = NativeSimulation.core(false)
+	if native != null:
+		native.develop_player(player,setup,rng,playing_share,season)
+		return
 	if player.is_empty():
 		return
 	var raw: Variant = player.get("attributes", null)
@@ -175,7 +180,12 @@ static func develop_player(
 	var pa := PlayerTypes.clamp_ability(int(player.get("potential_ability", 100)))
 	target = clampf(target, 1.0, float(pa))
 	var prefer := PlayerTypes.ATTR_GROUP_PHYSICAL if target < exact else ""
-	PlayerTypes.fit_attributes_to_exact(attributes, position, target, prefer)
+	var aptitudes := PlayerTypes.aptitudes_of(player)
+	PlayerTypes.fit_attributes_to_exact(attributes, position, target, prefer, aptitudes)
+	if age < DECLINE_START_AGE:
+		PlayerTypes.grow_secondary(
+			attributes, position, PlayerTypes.calc_ability_exact(attributes, position), aptitudes, rng
+		)
 
 	var next_ca := mini(PlayerTypes.calc_current_ability(attributes, position), pa)
 	player["current_ability"] = next_ca
@@ -318,19 +328,9 @@ static func _coaching_mod(setup: Dictionary) -> float:
 	return Config.TRAINING_GROWTH_FLOOR + Config.TRAINING_GROWTH_SPAN * quality
 
 
-## How hard the player works at it. Neutral personality (10) lands on 1.0.
+## Professional character is the sole personal development modifier.
 static func _drive_mod(player: Dictionary) -> float:
-	var raw: Variant = player.get("personality", null)
-	if typeof(raw) != TYPE_DICTIONARY:
-		return 1.0
-	var personality: Dictionary = raw
-	var total := 0.0
-	for key in DRIVE_KEYS:
-		total += float(PlayerTypes.clamp_personality(int(personality.get(key, LEVEL_NEUTRAL))))
-	var scaled := clampf(
-		total / float(DRIVE_KEYS.size() * PlayerTypes.PERSONALITY_MAX), 0.0, 1.0
-	)
-	return DRIVE_FLOOR + DRIVE_SPAN * scaled
+	return PROFESSIONAL_GROWTH_FACTOR if PlayerTypes.characters_of(player).has(PlayerTypes.CHAR_PROFESSIONAL) else 1.0
 
 
 static func _decline_step(player: Dictionary, age: int, rng: RandomNumberGenerator) -> float:

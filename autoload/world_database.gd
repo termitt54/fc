@@ -46,6 +46,12 @@ const MIGRATION_027_DIVISION_STRENGTH := preload(
 	"res://database/migrations/world_migration_027_division_strength.gd"
 )
 
+const MIGRATION_028_NATIONAL_TEAMS := preload("res://database/migrations/world_migration_028_national_teams.gd")
+
+const MIGRATION_029_INTERNATIONAL_DRAW := preload("res://database/migrations/world_migration_029_international_draw.gd")
+
+const MIGRATION_030_DIVISION_SORT := preload("res://database/migrations/world_migration_030_division_sort.gd")
+
 enum State {
 	CLOSED,
 	OPEN,
@@ -108,6 +114,9 @@ func initialize() -> bool:
 		MIGRATION_025_PRIZE_RULES.new(),
 		MIGRATION_026_YOUTH_TALENT_SCALE.new(),
 		MIGRATION_027_DIVISION_STRENGTH.new(),
+		MIGRATION_028_NATIONAL_TEAMS.new(),
+		MIGRATION_029_INTERNATIONAL_DRAW.new(),
+		MIGRATION_030_DIVISION_SORT.new(),
 	]
 
 	if not _migration_manager.migrate(DatabaseManager, migrations):

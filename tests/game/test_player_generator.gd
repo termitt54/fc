@@ -52,7 +52,7 @@ func _run() -> void:
 		_assert(not ids.has(pid), "Globally unique id: %d" % pid)
 		ids[pid] = true
 
-	_assert(int(id_state["next_id"]) == 51, "next_id advanced to 51 (got %s)" % str(id_state["next_id"]))
+	_assert(int(id_state["next_id"]) == 41, "next_id advanced to 41 (got %s)" % str(id_state["next_id"]))
 	var strength := PlayerGenerator.team_strength(squad_a)
 	_assert(strength > 40.0 and strength < 100.0, "team_strength in range (%.1f)" % strength)
 
@@ -68,7 +68,7 @@ func _assert_player_shape(player: Dictionary, club_id: int) -> void:
 	_assert(not name.is_empty(), "name present")
 	_assert(PlayerTypes.is_valid_position(str(player.get("position", ""))), "valid position for %s" % name)
 	var characters: Array = PlayerTypes.characters_of(player)
-	_assert(characters.size() == PlayerTypes.CHARACTERS_PER_PLAYER, "2 characters for %s" % name)
+	_assert(characters.size() == PlayerTypes.CHARACTERS_PER_PLAYER, "one dominant character for %s" % name)
 	for code in characters:
 		_assert(PlayerTypes.is_valid_character(str(code)), "valid character %s for %s" % [code, name])
 	if characters.size() == 2:
@@ -154,7 +154,7 @@ func _assert_distribution_rarity(rng: RandomNumberGenerator, _cache: Dictionary)
 			elite_pa += 1
 	var ca_pct := 100.0 * float(elite_ca) / float(maxi(total, 1))
 	var pa_pct := 100.0 * float(elite_pa) / float(maxi(total, 1))
-	_assert(total == 300, "world first-team pool is 12×25 (got %d)" % total)
+	_assert(total == 240, "world first-team pool is 12×20 (got %d)" % total)
 	_assert(ca_pct <= 5.0, "90+ CA is rare even at top clubs (%.2f%% of %d)" % [ca_pct, total])
 	_assert(pa_pct <= 15.0, "talent 70 keeps 90+ PA to its top group (%.2f%% of %d)" % [pa_pct, total])
 	YouthGenerationConfigScript.unload()

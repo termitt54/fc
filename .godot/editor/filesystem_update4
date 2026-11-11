@@ -1,1 +1,9 @@
-res://tests/game/test_user_title_stability.gd
+res://addons/fc_sim_core/fc_sim_core.gdextension
+res://game/career_archive.gd
+res://game/game_session.gd
+res://game/history_store.gd
+res://game/match_simulation_config.gd
+res://game/match_types.gd
+res://game/national_rating.gd
+res://game/transfer_market.gd
+res://game/transfer_market_job.gd

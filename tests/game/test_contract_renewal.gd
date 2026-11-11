@@ -17,6 +17,7 @@ func _ready() -> void:
 
 func _run() -> void:
 	print("=== Contract renewal tests ===")
+	_test_key_renewal()
 	_test_tick_years()
 	_test_loyal_stays_more_than_ambitious()
 	_test_negotiations_help()
@@ -246,3 +247,20 @@ func _assert(condition: bool, message: String) -> void:
 func _finish() -> void:
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	get_tree().quit(1 if _failed > 0 else 0)
+
+
+func _test_key_renewal() -> void:
+	var player := {"id": 1, "club_id": 1, "contract_years": 2, "age": 24, "current_ability": 80, "reputation": 600, "wage": 100000, "characters": []}
+	var club := {"reputation": 900}
+	var coach := {"attributes": {"negotiations": 20}}
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42
+	var offered := ContractRenewalScript.renewal_wage(player, {"key_player": true})
+	_assert(ContractRenewalScript.process_player(player, club, coach, rng, {"key_player": true}) == ContractRenewalScript.REASON_RENEWED, "important player renews one year before expiry")
+	_assert(int(player["contract_years"]) >= 2, "early renewal extends the remaining deal")
+	_assert(int(player["wage"]) == offered, "signed wage equals evaluated offer")
+	player["contract_years"] = 2
+	club["reputation"] = 200
+	_assert(ContractRenewalScript.process_player(player, club, coach, rng, {"key_player": true}) == ContractRenewalScript.REASON_ACTIVE, "rejected early renewal preserves the existing contract")
+	_assert(int(player["contract_years"]) == 1 and int(player["club_id"]) == 1, "early rejection does not release the player")
+	_assert(not ContractRenewalScript._wants_to_stay(player, club, coach, 0.0), "a rejected sporting offer cannot be accepted by a lucky roll")
