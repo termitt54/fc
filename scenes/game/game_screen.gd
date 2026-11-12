@@ -561,6 +561,8 @@ func _refresh_tabs(keep_selection: bool) -> void:
 	var titles := PackedStringArray(["Таблица", "Календарь", "Статистика", "Превью"])
 	if NationalTeams.is_unit(unit):
 		titles[0] = "Группы"
+	if CupCompetition.enabled(unit):
+		titles[0] = "Этапы кубка"
 	var playoff_enabled := bool(unit.get("playoff", {}).get("enabled", false))
 	if playoff_enabled:
 		titles.append("Плей-офф")
@@ -1187,7 +1189,37 @@ func _show_fatal(message: String) -> void:
 	_empty_state.text = message
 
 
+func _build_cup_view(unit: Dictionary) -> void:
+	var state: Dictionary = unit.get("cup_state", {})
+	if bool(state.get("skipped", false)):
+		_content.add_child(_hint_label("В этом сезоне кубок не проводится: учитываются периодичность и стартовый сезон турнира."))
+		return
+	if bool(state.get("finished", false)):
+		_content.add_child(_hint_label("Победитель кубка: " + GameSession.club_name(unit, int(state.get("champion_id", 0)))))
+	if int(state.get("index", -1)) < 0:
+		_content.add_child(_hint_label("Кубок начнётся после завершения дивизионов и их плей-офф."))
+	for current in state.get("stages", []):
+		_content.add_child(_hint_label(str(current["name"]) + (" · завершён" if bool(current.get("complete", false)) else " · идёт")))
+		if str(current["kind"]) == "GROUPS":
+			var group_number := 0
+			for table in CupCompetition.group_tables(current):
+				group_number += 1
+				_content.add_child(_hint_label("Группа %d · очки / мячи" % group_number))
+				for row in table:
+					_content.add_child(_hint_label("%s — %d · %d:%d" % [GameSession.club_name(unit, int(row["club_id"])), int(row["points"]), int(row["goals_for"]), int(row["goals_against"])]))
+		else:
+			for id in current.get("byes", []):
+				_content.add_child(_hint_label(GameSession.club_name(unit, int(id)) + " · проход без матча"))
+		for m in current.get("matches", []):
+			_content.add_child(_match_row(unit, m, false))
+	for i in range(int(state.get("index", -1)) + 1, unit.get("cup_config", {}).get("stages", []).size()):
+		_content.add_child(_hint_label(str(unit["cup_config"]["stages"][i]["name"]) + " · ожидает участников"))
+
+
 func _build_table_view(unit: Dictionary) -> void:
+	if CupCompetition.enabled(unit):
+		_build_cup_view(unit)
+		return
 	if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
 		_content.add_child(_hint_label("Жеребьёвка групп состоится перед стартом турнира после клубных финалов."))
 		return
@@ -1884,6 +1916,9 @@ func _open_stats_player(player_id: int) -> void:
 
 
 func _build_calendar_view(unit: Dictionary) -> void:
+	if CupCompetition.enabled(unit) and unit.get("matches", []).is_empty():
+		_content.add_child(_hint_label("Календарь кубка появится после завершения дивизионов и их плей-офф."))
+		return
 	if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
 		_content.add_child(_hint_label("Календарь появится после жеребьёвки перед стартом турнира."))
 		return
@@ -1909,6 +1944,8 @@ func _build_calendar_view(unit: Dictionary) -> void:
 		var circle := int(day_matches[0].get("circle", 0)) if not day_matches.is_empty() else 0
 		if stage == "PLAYOFF":
 			title += " · плей-офф"
+		elif stage.begins_with("CUP_"):
+			title += " · " + str(day_matches[0].get("cup_stage", "Кубок"))
 		elif circle > 0:
 			title += " · %d-й круг" % circle
 		_content.add_child(_section_title(title))
@@ -2005,6 +2042,9 @@ func _playoff_meta_text(playoff: Dictionary) -> String:
 
 
 func _build_playoff_view(unit: Dictionary) -> void:
+	if CupCompetition.enabled(unit):
+		_build_cup_view(unit)
+		return
 	var playoff: Dictionary = unit.get("playoff", {})
 	if not bool(playoff.get("enabled", false)):
 		_content.add_child(_hint_label("В этом турнире плей-офф не предусмотрен."))

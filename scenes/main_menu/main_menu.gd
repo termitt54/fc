@@ -25,6 +25,11 @@ func _on_new_game_pressed() -> void:
 	var started := GameSession.start_new_game()
 	if not started["success"]:
 		push_warning("[MainMenu] New game failed: %s" % started.get("error", ""))
+		var message = preload("res://ui/components/we_message_dialog.tscn").instantiate()
+		add_child(message)
+		message.open_info("Не удалось начать игру", str(started.get("error", "Проверьте настройки турниров.")))
+		message.closed.connect(func(): message.queue_free())
+		return
 	get_tree().change_scene_to_file("res://scenes/game/game_screen.tscn")
 
 

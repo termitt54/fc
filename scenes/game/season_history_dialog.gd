@@ -72,6 +72,32 @@ func _show_tab(index: int) -> void:
 		page.add_child(hint)
 		_show_places(page)
 		return
+	if _unit.has("cup_state") and index in [0, 2]:
+		if index == 2:
+			_calendar = page
+			_calendar_rows = _unit.get("matches", []).duplicate(false)
+			_render_matches()
+		else:
+			var scroll := ScrollContainer.new()
+			scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+			page.add_child(scroll)
+			var content := VBoxContainer.new()
+			content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			scroll.add_child(content)
+			for stage in _unit["cup_state"].get("stages", []):
+				_message(content, str(stage["name"]))
+				var group := 0
+				for table in CupCompetition.group_tables(stage):
+					group += 1
+					_message(content, "Группа %d" % group)
+					for row in table:
+						var id := int(row["club_id"])
+						var identity: Dictionary = _unit.get("clubs_by_id", {}).get(id, _unit.get("clubs_by_id", {}).get(str(id), {}))
+						_message(content, "%s — %d · %d:%d" % [identity.get("name", str(id)), int(row["points"]), int(row["goals_for"]), int(row["goals_against"])])
+				for id in stage.get("outputs", []):
+					var identity: Dictionary = _unit.get("clubs_by_id", {}).get(int(id), _unit.get("clubs_by_id", {}).get(str(id), {}))
+					_message(content, "Прошёл дальше: " + str(identity.get("name", id)))
+		return
 	match index:
 		0: _tables(page)
 		1: _statistics(page)
@@ -317,6 +343,8 @@ func _match_card(host: Node, match_row: Dictionary) -> void:
 		center.add_child(extra)
 	_team(line, int(match_row.get("away_id", 0)))
 	var stage := "Плей-офф" if str(match_row.get("stage", "")) == "PLAYOFF" else ("Групповой этап" if NationalTeams.is_unit(_unit) else "Регулярный сезон")
+	if match_row.has("cup_stage"):
+		stage = str(match_row["cup_stage"])
 	if bool(match_row.get("is_third_place", false)):
 		stage = "Матч за 3-е место"
 	var caption := _label(stage, 11, WeTokens.TEXT_MUTED)

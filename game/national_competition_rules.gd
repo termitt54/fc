@@ -42,6 +42,8 @@ static func regular_complete(unit: Dictionary) -> bool:
 	return true if has_regular else (unit.get("matches", []) as Array).is_empty()
 
 static func is_unit_season_complete(unit: Dictionary) -> bool:
+	if unit.has("cup_state"):
+		return bool(unit["cup_state"].get("finished", false))
 	var playoff: Dictionary = unit.get("playoff", {})
 	if bool(playoff.get("enabled", false)):
 		return bool(playoff.get("finished", false))

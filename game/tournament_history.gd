@@ -9,6 +9,9 @@ static func snapshot(unit: Dictionary, season: int) -> Dictionary:
 			var value: Variant = unit[field]
 			copy[field] = value.duplicate(true) if value is Dictionary or value is Array else value
 	copy["season"] = season
+	if unit.has("cup_state"):
+		copy["cup_config"] = unit.get("cup_config", {}).duplicate(true)
+		copy["cup_state"] = unit["cup_state"].duplicate(true)
 	copy[UnitSeasonStats.KEY] = UnitSeasonStats.ensure(unit).duplicate(true)
 	copy["matches"] = []
 	for match_row in unit.get("matches", []):
@@ -18,6 +21,8 @@ static func snapshot(unit: Dictionary, season: int) -> Dictionary:
 				var value: Variant = match_row[field]
 				compact[field] = value.duplicate(true) if value is Dictionary or value is Array else value
 		# Old match reports may be the only source of penalty scores.
+		if match_row.has("cup_stage"):
+			compact["cup_stage"] = match_row["cup_stage"]
 		if not compact.has("shootout") and match_row.get("report", {}).has("shootout"):
 			compact["shootout"] = match_row["report"]["shootout"].duplicate(true)
 		copy["matches"].append(compact)

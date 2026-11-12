@@ -31,7 +31,7 @@ static func simulate(config: Dictionary, rng: RandomNumberGenerator) -> Dictiona
 		var spec: Dictionary=config.get(side,{})
 		TacticTypesScript.ensure_coach_tactics(spec.get("coach",{}))
 	var native: Variant = NativeSimulation.core()
-	if native != null and NativeSimulation.supports_match(config):
+	if native != null and not config.has("aggregate_offset") and NativeSimulation.supports_match(config):
 		return native.simulate(config,rng,MatchSimConfigScript.fingerprint())
 	if rng == null:
 		rng = RandomNumberGenerator.new()
@@ -41,6 +41,7 @@ static func simulate(config: Dictionary, rng: RandomNumberGenerator) -> Dictiona
 	var away_spec: Dictionary = config.get("away", {})
 	var neutral := bool(config.get("neutral", false))
 	var allow_draw := bool(config.get("allow_draw", true))
+	var aggregate_offset := int(config.get("aggregate_offset", 0))
 	var importance := float(config.get("importance", 1.0))
 	var discipline: Dictionary = config.get("discipline", DisciplineRulesScript.defaults())
 
@@ -68,7 +69,7 @@ static func simulate(config: Dictionary, rng: RandomNumberGenerator) -> Dictiona
 	var extra_time := false
 	var shootout: Dictionary = {}
 
-	if not allow_draw and home["goals"] == away["goals"]:
+	if not allow_draw and int(home["goals"]) + aggregate_offset == int(away["goals"]):
 		extra_time = true
 		for phase in MatchTypesScript.ET_PHASES:
 			_run_phase(
@@ -80,7 +81,7 @@ static func simulate(config: Dictionary, rng: RandomNumberGenerator) -> Dictiona
 				true
 			)
 		minute = MatchTypesScript.REGULAR_MINUTES + MatchTypesScript.ET_MINUTES
-		if home["goals"] == away["goals"]:
+		if int(home["goals"]) + aggregate_offset == int(away["goals"]):
 			shootout = _run_shootout(home, away, ctx, minute)
 
 	_close_minutes(home, minute)
@@ -89,10 +90,10 @@ static func simulate(config: Dictionary, rng: RandomNumberGenerator) -> Dictiona
 	var home_goals: int = int(home["goals"])
 	var away_goals: int = int(away["goals"])
 	var winner := 0
-	if home_goals != away_goals:
-		winner = 1 if home_goals > away_goals else -1
-	elif not shootout.is_empty():
+	if not shootout.is_empty():
 		winner = 1 if int(shootout.get("home", 0)) > int(shootout.get("away", 0)) else -1
+	elif home_goals != away_goals:
+		winner = 1 if home_goals > away_goals else -1
 
 	_finalize_team(home, away_goals, winner, minute)
 	_finalize_team(away, home_goals, -winner, minute)

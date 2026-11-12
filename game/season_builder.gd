@@ -48,6 +48,8 @@ func build_new_game(rng: RandomNumberGenerator = null) -> Dictionary:
 		if not units_result["success"]:
 			continue
 		for unit in units_result["data"]:
+			if str(unit.get("unit_kind", "")) == CompetitionTypes.UNIT_CUP:
+				unit["cup_config"] = CupFormatRepository.new().get_config(int(unit.get("id", 0)))
 			var unit_id: int = int(unit.get("id", 0))
 			var national := str(competition.get("scope_type", "")) == CompetitionTypes.SCOPE_INTERNATIONAL
 			if national and str(competition.get("age_group", CompetitionTypes.AGE_SENIOR)) != CompetitionTypes.AGE_SENIOR:
@@ -101,6 +103,9 @@ func build_new_game(rng: RandomNumberGenerator = null) -> Dictionary:
 			initial_elos
 		))
 
+	var cup_errors := CupCompetition.initialize_all(seasons, maxi(season_number, 1), rng.seed)
+	if not cup_errors.is_empty():
+		return DbResult.fail("\n".join(cup_errors))
 	return DbResult.ok({
 		"season_number": maxi(season_number, 1),
 		"season_day": GameSession.MARKET_OPEN_DAY,
@@ -180,7 +185,7 @@ func _build_unit_season(
 		"current_round": 0,
 	}
 
-	return {
+	var season := {
 		"id": unit_id,
 		"competition_id": int(competition.get("id", 0)),
 		"national": national,
@@ -203,6 +208,9 @@ func _build_unit_season(
 		"clubs_by_id": clubs_by_id,
 		"estimated_days": _estimate_unit_days(matches, playoff),
 	}
+	if not (unit.get("cup_config", {}) as Dictionary).is_empty():
+		season["cup_config"] = unit["cup_config"].duplicate(true)
+	return season
 
 
 func _initial_club_elos(pending_units: Array) -> Dictionary:

@@ -40,19 +40,26 @@ static func simulate(
 	var home_id := int(match_row.get("home_id", 0))
 	var away_id := int(match_row.get("away_id", 0))
 	var playoff := str(match_row.get("stage", MatchTypesScript.STAGE_REGULAR)) == MatchTypesScript.STAGE_PLAYOFF
+	var cup_knockout := str(match_row.get("stage", "")) == "CUP_KNOCKOUT"
+	var deciding := cup_knockout and int(match_row.get("cup_leg", 0)) == int(match_row.get("cup_legs", 1)) - 1
+	var aggregate_offset := 0
+	if deciding and int(match_row.get("cup_legs", 1)) == 2:
+		for previous in unit.get("matches", []):
+			if int(previous.get("cup_round", -1)) == int(match_row.get("cup_round", -2)) and int(previous.get("cup_pair", -1)) == int(match_row.get("cup_pair", -2)) and int(previous.get("cup_leg", -1)) == 0:
+				aggregate_offset = int(previous.get("away_goals", 0)) - int(previous.get("home_goals", 0))
 	var discipline: Dictionary = DisciplineRulesScript.from_rules(unit.get("rules", {}))
 
-	var result: Dictionary = MatchEngineScript.simulate(
-		{
+	var match_config := {
 			"home": _team_spec(session, unit, home_id),
 			"away": _team_spec(session, unit, away_id),
-			"allow_draw": not playoff,
+			"allow_draw": not (playoff or deciding),
 			"neutral": NationalTeams.is_unit(unit) or bool(match_row.get("neutral", false)),
-			"importance": PLAYOFF_IMPORTANCE if playoff else 1.0,
+			"importance": PLAYOFF_IMPORTANCE if playoff or cup_knockout else 1.0,
 			"discipline": discipline,
-		},
-		rng
-	)
+		}
+	if deciding and int(match_row.get("cup_legs", 1)) == 2:
+		match_config["aggregate_offset"] = aggregate_offset
+	var result: Dictionary = MatchEngineScript.simulate(match_config, rng)
 
 	var home_goals := int(result.get("home_goals", 0))
 	var away_goals := int(result.get("away_goals", 0))

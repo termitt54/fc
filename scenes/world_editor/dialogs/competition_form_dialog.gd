@@ -28,6 +28,7 @@ var _collapsed_unit_ids: Dictionary = {} # unit_id -> true when collapsed
 var _clubs_dialog: Control
 var _ranking_dialog: Control
 var _prizes_dialog: Control
+var _cup_dialog: Control
 
 var _identity_box: VBoxContainer
 var _rules_section: PanelContainer
@@ -63,6 +64,9 @@ func _ready() -> void:
 	add_child(_prizes_dialog)
 	_prizes_dialog.prizes_submitted.connect(_on_unit_prizes_submitted)
 	_apply_mode_chrome()
+	_cup_dialog = preload("res://scenes/world_editor/dialogs/cup_format_dialog.tscn").instantiate()
+	add_child(_cup_dialog)
+	_cup_dialog.saved.connect(_load_units)
 	confirmed.connect(_on_save_pressed)
 	cancelled.connect(_on_cancel_pressed)
 
@@ -505,6 +509,17 @@ func _make_unit_card(unit: Dictionary, kind_index: int) -> PanelContainer:
 	)
 
 	body.add_child(_make_unit_divider())
+	if kind == CompetitionTypes.UNIT_CUP and not _is_international():
+		var cup_name := _make_text("Название кубка", NAME_MAX_LENGTH)
+		cup_name.text = unit_name
+		cup_name.text_changed.connect(func(t): _on_unit_name_changed(unit_id, t))
+		body.add_child(cup_name)
+		var configure := Button.new()
+		configure.text = "Настроить этапы, участников и жеребьёвку"
+		configure.pressed.connect(func(): _cup_dialog.open_editor(unit, _units))
+		body.add_child(configure)
+		body.add_child(_make_unit_section("Дисциплина", _make_discipline_row(unit_id, unit)))
+		return card
 
 	var fields := _make_row()
 	var name_field := _make_text("Название", NAME_MAX_LENGTH)

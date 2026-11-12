@@ -827,6 +827,9 @@ func _advance_day_sync() -> Dictionary:
 
 	if not is_market_day(season_day):
 		for unit in units:
+			if CupCompetition.enabled(unit):
+				_next_match_id = CupCompetition.after_day(unit, units, season_day, _next_match_id)
+				continue
 			if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
 				continue
 			var started: Dictionary = PlayoffManagerScript.maybe_start(unit, season_day, _next_match_id)
@@ -889,6 +892,9 @@ func _advance_day_impl(work: RefCounted = null) -> Dictionary:
 
 	if not is_market_day(season_day):
 		for unit in units:
+			if CupCompetition.enabled(unit):
+				_next_match_id = CupCompetition.after_day(unit, units, season_day, _next_match_id)
+				continue
 			if NationalTeams.is_unit(unit) and not bool(unit.get("international_started", false)):
 				continue
 			if work != null:
@@ -952,6 +958,20 @@ func start_new_season() -> Dictionary:
 	var movement_plan := LeagueMovementScript.plan(units, sorted_standings)
 	if not movement_plan["success"]:
 		return movement_plan
+	# Validate next year's cup participants before any season state is mutated.
+	if units.any(func(u): return CupCompetition.enabled(u)):
+		var projected_units: Array = []
+		for u in units:
+			var projected: Dictionary = u.duplicate(false)
+			projected["divisions"] = u.get("divisions", []).duplicate(true)
+			projected["clubs_by_id"] = u.get("clubs_by_id", {}).duplicate(false)
+			projected_units.append(projected)
+		LeagueMovementScript.apply(projected_units, movement_plan["data"])
+		for projected in projected_units:
+			if CupCompetition.enabled(projected):
+				var cup_validation := CupCompetition.validate_world(projected, projected_units)
+				if not cup_validation.is_empty():
+					return DbResult.fail("Следующий сезон: " + "\n".join(cup_validation))
 	var history_written: Dictionary = _flush_history()
 	if not history_written["success"]:
 		return history_written
@@ -977,6 +997,9 @@ func start_new_season() -> Dictionary:
 	LeagueMovementScript.apply(units, movement_plan["data"])
 	for i in units.size():
 		units[i] = _reset_unit_for_new_season(units[i])
+	var cup_errors := CupCompetition.initialize_all(units, season_number, _rng.seed)
+	if not cup_errors.is_empty():
+		return DbResult.fail("\n".join(cup_errors))
 	ClubRatingScript.ensure(self)
 	last_new_season_profile["reset_competitions_ms"] = float(Time.get_ticks_usec() - phase_start) / 1000.0
 
@@ -1243,6 +1266,10 @@ func _all_units_complete() -> bool:
 	if units.is_empty():
 		return false
 	for unit in units:
+		if CupCompetition.enabled(unit):
+			if not bool(unit.get("cup_state", {}).get("finished", false)):
+				return false
+			continue
 		if NationalTeams.is_unit(unit):
 			if not NationalTeams.due(unit, season_number):
 				continue
